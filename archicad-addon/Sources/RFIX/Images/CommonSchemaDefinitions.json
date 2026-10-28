@@ -3029,7 +3029,7 @@
         "properties": {
             "coordinates": {
                 "type": "array",
-                "description": "The points of the polygon, in the XY plane of 'plane'.",
+                "description": "The points of the polygon, in floor plan coordinates.",
                 "items": {
                     "$ref": "#/Coordinate2D"
                 },
@@ -3044,7 +3044,7 @@
             },
             "plane": {
                 "$ref": "#/CoordinateSystem3D",
-                "description": "The plane of the polygon. The project axes by default."
+                "description": "Holes only: the plane the cutting body starts from, which it is extruded from along its Z axis. The project axes by default."
             },
             "depth": {
                 "type": "number",

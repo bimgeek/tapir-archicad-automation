@@ -4621,11 +4621,11 @@ GS::Optional<GS::UniString> CreateShellsCommand::GetInputParametersSchema () con
                     },
                     "basePlane": {
                         "$ref": "#/CoordinateSystem3D",
-                        "description": "Base plane of the shell; the profiles and the contour and hole polygons are given in it. The project axes by default, except for a Revolved shell, whose default base plane stands upright (its Y axis is the project Z axis), so the profile's x is the radius and its y the height."
+                        "description": "Base plane of the shell, in project coordinates; the profiles, the extrusion and the axis are given in it. The project axes by default, except for a Revolved shell, whose default base plane stands upright (its Y axis is the project Z axis), so the profile's x is the radius and its y the height."
                     },
                     "profile": {
                         "$ref": "#/ShellProfile",
-                        "description": "The profile polyline, in the base plane's XY plane."
+                        "description": "The profile polyline. Extruded: in the plane across the extrusion, x horizontal and y up. Revolved: in the base plane's XY plane. Ruled: in the XY plane of 'profilePlane'."
                     },
                     "thickness": {
                         "type": "number",
@@ -4705,11 +4705,11 @@ GS::Optional<GS::UniString> CreateShellsCommand::GetInputParametersSchema () con
                     },
                     "contour": {
                         "$ref": "#/ShellCutPolygon",
-                        "description": "Optional clipping contour: only the part of the shell inside this polygon is kept. Its 'depth' is ignored."
+                        "description": "Optional clipping contour, in floor plan coordinates: only the part of the shell above or below this polygon is kept. Its 'plane' and 'depth' are ignored."
                     },
                     "holes": {
                         "type": "array",
-                        "description": "Optional holes, each cut by a body extruded 'depth' from its polygon.",
+                        "description": "Optional holes, each cut by the polygon (in floor plan coordinates) extruded 'depth' from its 'plane', vertically by default.",
                         "items": { "$ref": "#/ShellCutPolygon" }
                     }
                 },
@@ -4809,13 +4809,9 @@ GS::Optional<GS::UniString> CreateRailingsCommand::GetInputParametersSchema () c
                         "type": "integer",
                         "description": "Optional story index of the railing. Without it the railing is placed on the story of the Railing tool defaults."
                     },
-                    "bottomOffset": {
-                        "type": "number",
-                        "description": "Optional offset of the railing's reference line from its story."
-                    },
                     "polylineCoordinates": {
                         "type": "array",
-                        "description": "The nodes of the railing's reference line; z is the height of the node above the railing's base.",
+                        "description": "The nodes of the railing's reference line; z is the elevation of the node above the railing's story.",
                         "items": { "$ref": "#/Coordinate3D" },
                         "minItems": 2
                     },
@@ -4853,7 +4849,6 @@ GS::Optional<GS::ObjectState> CreateRailingsCommand::SetTypeSpecificParameters (
     }
 
     parameters.Get ("floorIndex", element.header.floorInd);
-    parameters.Get ("bottomOffset", element.railing.bottomOffset);
 
     // The reference line replaces whatever the defaults' memo held; the railing's segment, post,
     // rail and panel definitions in the same memo are kept, as Do_CreateRailing in the DevKit does.
@@ -4915,25 +4910,12 @@ GS::Optional<GS::UniString> CreateSkylightsCommand::GetInputParametersSchema () 
                     },
                     "anchorPosition": {
                         "$ref": "#/Coordinate2D",
-                        "description": "Floor plan position of the skylight's anchor point; the skylight lands on the owner's plane under it."
-                    },
-                    "anchorLevel": {
-                        "type": "number",
-                        "description": "Z coordinate of the anchor point."
+                        "description": "Floor plan position of the skylight's anchor point. The skylight is placed on the owner's surface above it and turned to its slope; in a multi-plane roof that is the roof plane over this position."
                     },
                     "anchorPoint": {
                         "type": "string",
                         "enum": ["BottomCenter", "BottomLeft", "BottomRight", "TopCenter", "TopLeft", "TopRight"],
                         "description": "Which point of the skylight anchorPosition places."
-                    },
-                    "fixMode": {
-                        "type": "string",
-                        "enum": ["Horizontal", "Vertical"],
-                        "description": "What the skylight keeps when the owner's angle or level changes: its horizontal distance from the pivot line, or its anchor level."
-                    },
-                    "vertexId": {
-                        "type": "integer",
-                        "description": "Multi-plane roofs: the ID of the pivot polygon vertex whose roof plane holds the skylight."
                     },
                     "azimuthAngle": {
                         "type": "number",
@@ -4969,9 +4951,7 @@ GS::Optional<GS::ObjectState> CreateSkylightsCommand::SetTypeSpecificParameters 
     if (anchorPosition.HasValue ()) {
         element.skylight.anchorPosition = anchorPosition.Get ();
     }
-    parameters.Get ("anchorLevel", element.skylight.anchorLevel);
     parameters.Get ("azimuthAngle", element.skylight.azimuthAngle);
-    parameters.Get ("vertexId", element.skylight.vertexID);
 
     GS::UniString anchorPoint;
     if (parameters.Get ("anchorPoint", anchorPoint)) {
@@ -4984,10 +4964,6 @@ GS::Optional<GS::ObjectState> CreateSkylightsCommand::SetTypeSpecificParameters 
                 element.skylight.anchorPoint = anchor.second;
             }
         }
-    }
-    GS::UniString fixMode;
-    if (parameters.Get ("fixMode", fixMode)) {
-        element.skylight.fixMode = fixMode == "Vertical" ? APISkylightFixMode_Vertical : APISkylightFixMode_Horizontal;
     }
 
     const auto width = GetOptionalDouble (parameters, "width");
