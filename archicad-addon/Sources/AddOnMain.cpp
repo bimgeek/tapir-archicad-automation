@@ -791,6 +791,18 @@ GSErrCode Initialize (void)
             elementCommands, "1.4.0",
             "Creates Roof elements based on footprint, level and roof profile data. Creates a multi-plane roof by default; pass 'pivotLine' (and optionally 'angle') to create a single-plane roof instead."
         );
+        err |= RegisterCommand<CreateShellsCommand> (
+            elementCommands, "1.7.4",
+            "Creates extruded, revolved and ruled Shell elements from profile polylines, with thickness, structure, an optional clipping contour and holes."
+        );
+        err |= RegisterCommand<CreateRailingsCommand> (
+            elementCommands, "1.7.4",
+            "Creates Railing elements along a reference polyline. The segment, post, rail and panel settings come from the Railing tool defaults or from a Railing favorite."
+        );
+        err |= RegisterCommand<CreateSkylightsCommand> (
+            elementCommands, "1.7.4",
+            "Creates Skylight elements in single- and multi-plane roofs and in shells."
+        );
         err |= RegisterCommand<CreateCurtainWallsCommand> (
             elementCommands, "1.7.2",
             "Creates Curtain Wall elements along a reference polyline with a column (primary) and row (secondary) pattern. The frame and panel classes come from the favorite or from the Curtain Wall tool defaults; the pattern cells can assign them to the grid."

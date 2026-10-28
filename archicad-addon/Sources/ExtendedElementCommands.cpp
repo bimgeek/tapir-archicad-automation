@@ -335,7 +335,7 @@ GSErrCode SwitchCurrentDatabaseToFloorPlan (API_DatabaseInfo& previousDatabase, 
 
 namespace {
 
-GSErrCode PrepareWindowOrDoorDefaults (API_ElemTypeID elemTypeId, API_Element& element, API_ElementMemo& memo, API_SubElement& marker)
+GSErrCode PrepareWindowOrDoorDefaultsWithMarker (API_ElemTypeID elemTypeId, API_Element& element, API_ElementMemo& memo, API_SubElement& marker)
 {
     element = {};
     marker = {};
@@ -403,6 +403,29 @@ GSErrCode PrepareWindowOrDoorDefaults (API_ElemTypeID elemTypeId, API_Element& e
     }
     marker.subElem.object.useObjPens = true;
     return NoError;
+}
+
+// With the tool's Dimension Marker set to "No Marker", or its marker part missing from the loaded
+// libraries, the marker defaults cannot be read and every create failed (ENG-11187); Archicad
+// places such a window or door without a marker, so the create does the same.
+GSErrCode PrepareWindowOrDoorDefaults (API_ElemTypeID elemTypeId, API_Element& element, API_ElementMemo& memo, API_SubElement& marker, bool& withMarker)
+{
+    withMarker = PrepareWindowOrDoorDefaultsWithMarker (elemTypeId, element, memo, marker) == NoError;
+    if (withMarker) {
+        return NoError;
+    }
+
+    ACAPI_DisposeElemMemoHdls (&memo);
+    ACAPI_DisposeElemMemoHdls (&marker.memo);
+    memo = {};
+    marker = {};
+    element = {};
+#ifdef ServerMainVers_2600
+    element.header.type = elemTypeId;
+#else
+    element.header.typeID = elemTypeId;
+#endif
+    return ACAPI_Element_GetDefaults (&element, &memo);
 }
 
 // Apply a named FAVORITE to the Door/Window tool defaults BEFORE
@@ -1751,39 +1774,56 @@ GS::Optional<GS::UniString> ApplyWallStructure (
     return {};
 }
 
-GS::Optional<GS::UniString> ApplyRoofStructure (
-    API_Element& element,
-    API_Element* mask,
+// Roofs and shells share API_ShellBaseType, so CreateShells takes the same structure fields.
+GS::Optional<GS::UniString> ApplyShellBaseStructure (
+    API_ShellBaseType& shellBase,
     const GS::ObjectState& details,
-    bool& changed)
+    bool& applied)
 {
+    applied = false;
     StructureSelection selection;
     auto error = ParseStructureSelection (details, true, false, selection);
     if (error.HasValue ()) {
         return error;
     }
 
-    if (selection.kind == StructureSelectionKind::Unspecified) {
-        return {};
-    }
-
     switch (selection.kind) {
         case StructureSelectionKind::Basic:
-            element.roof.shellBase.modelElemStructureType = API_BasicStructure;
+            shellBase.modelElemStructureType = API_BasicStructure;
             if (selection.buildingMaterial != APIInvalidAttributeIndex) {
-                element.roof.shellBase.buildingMaterial = selection.buildingMaterial;
+                shellBase.buildingMaterial = selection.buildingMaterial;
             }
-            element.roof.shellBase.composite = APIInvalidAttributeIndex;
+            shellBase.composite = APIInvalidAttributeIndex;
             break;
         case StructureSelectionKind::Composite:
-            element.roof.shellBase.modelElemStructureType = API_CompositeStructure;
+            shellBase.modelElemStructureType = API_CompositeStructure;
             if (selection.composite != APIInvalidAttributeIndex) {
-                element.roof.shellBase.composite = selection.composite;
+                shellBase.composite = selection.composite;
             }
             break;
         case StructureSelectionKind::Profile:
         case StructureSelectionKind::Unspecified:
-            break;
+            return {};
+    }
+
+    applied = true;
+    return {};
+}
+
+GS::Optional<GS::UniString> ApplyRoofStructure (
+    API_Element& element,
+    API_Element* mask,
+    const GS::ObjectState& details,
+    bool& changed)
+{
+    bool applied = false;
+    auto error = ApplyShellBaseStructure (element.roof.shellBase, details, applied);
+    if (error.HasValue ()) {
+        return error;
+    }
+
+    if (!applied) {
+        return {};
     }
 
     if (mask != nullptr) {
@@ -4279,6 +4319,685 @@ GS::Optional<GS::ObjectState> CreateStairsCommand::SetTypeSpecificParameters (AP
     return {};
 }
 
+namespace {
+
+constexpr double HalfTurn = 3.14159265358979323846;
+
+API_Tranmat GetIdentityTranmat ()
+{
+    API_Tranmat tranmat = {};
+    tranmat.tmx[0] = 1.0;
+    tranmat.tmx[5] = 1.0;
+    tranmat.tmx[10] = 1.0;
+    return tranmat;
+}
+
+// A CoordinateSystem3D's axes are the columns of the 3x4 row-major tmx and its origin is the
+// translation column; what the caller leaves out keeps the value tranmat already has.
+GS::Optional<GS::UniString> ApplyCoordinateSystem3D (const GS::ObjectState& parameters, const char* fieldName, API_Tranmat& tranmat)
+{
+    const GS::ObjectState* system = parameters.Get (fieldName);
+    if (system == nullptr) {
+        return {};
+    }
+
+    const auto xAxis = GetOptionalCoordinate3D (*system, "xAxis");
+    const auto yAxis = GetOptionalCoordinate3D (*system, "yAxis");
+    const auto zAxis = GetOptionalCoordinate3D (*system, "zAxis");
+    const int axisCount = (int) xAxis.HasValue () + (int) yAxis.HasValue () + (int) zAxis.HasValue ();
+    if (axisCount != 0 && axisCount != 3) {
+        return GS::UniString::Printf ("'%s': give all three of 'xAxis', 'yAxis' and 'zAxis' together, or none at all.", fieldName);
+    }
+
+    double* tmx = tranmat.tmx;
+    if (axisCount == 3) {
+        tmx[0] = xAxis.Get ().x; tmx[4] = xAxis.Get ().y; tmx[8]  = xAxis.Get ().z;
+        tmx[1] = yAxis.Get ().x; tmx[5] = yAxis.Get ().y; tmx[9]  = yAxis.Get ().z;
+        tmx[2] = zAxis.Get ().x; tmx[6] = zAxis.Get ().y; tmx[10] = zAxis.Get ().z;
+    }
+    const auto origin = GetOptionalCoordinate3D (*system, "origin");
+    if (origin.HasValue ()) {
+        tmx[3] = origin.Get ().x;
+        tmx[7] = origin.Get ().y;
+        tmx[11] = origin.Get ().z;
+    }
+    return {};
+}
+
+GS::Optional<GS::UniString> GetShellPolyArcs (const GS::Array<GS::ObjectState>& arcs, Int32 nCoords, GS::Array<API_PolyArc>& polyArcs)
+{
+    polyArcs = GetPolyArcs (arcs, 1);
+    for (const API_PolyArc& arc : polyArcs) {
+        if (arc.begIndex < 1 || arc.endIndex < 1 || arc.begIndex > nCoords || arc.endIndex > nCoords) {
+            return GS::UniString ("An arc index is outside the coordinates of its polyline.");
+        }
+    }
+    return {};
+}
+
+// A shell profile is stored as a closed polygon whose bodyFlags say which edges make a surface;
+// the DevKit's shell samples leave the closing edge without one, which is an open profile.
+GS::Optional<GS::UniString> FillShellShape (const GS::ObjectState& profile, API_Polygon& shape, API_ShellShapeData& shapeData)
+{
+    GS::Array<GS::ObjectState> coordinates;
+    GS::Array<GS::ObjectState> arcs;
+    bool closed = false;
+    profile.Get ("coordinates", coordinates);
+    profile.Get ("arcs", arcs);
+    profile.Get ("closed", closed);
+    if (closed && coordinates.GetSize () > 1 && IsSame2DCoordinate (coordinates.GetFirst (), coordinates.GetLast ())) {
+        coordinates.Pop ();
+    }
+    const Int32 nPoints = (Int32) coordinates.GetSize ();
+    if (nPoints < (closed ? 3 : 2)) {
+        return GS::UniString (closed ? "A closed shell profile needs at least 3 coordinates." : "A shell profile needs at least 2 coordinates.");
+    }
+
+    shape = {};
+    shape.nCoords = nPoints + 1;
+    shape.nSubPolys = 1;
+
+    GS::Array<API_PolyArc> polyArcs;
+    auto arcError = GetShellPolyArcs (arcs, shape.nCoords, polyArcs);
+    if (arcError.HasValue ()) {
+        return arcError;
+    }
+    shape.nArcs = (Int32) polyArcs.GetSize ();
+
+    shapeData.coords = reinterpret_cast<API_Coord**> (BMAllocateHandle ((shape.nCoords + 1) * sizeof (API_Coord), ALLOCATE_CLEAR, 0));
+    shapeData.pends = reinterpret_cast<Int32**> (BMAllocateHandle ((shape.nSubPolys + 1) * sizeof (Int32), ALLOCATE_CLEAR, 0));
+    shapeData.bodyFlags = reinterpret_cast<bool**> (BMAllocateHandle ((shape.nCoords + 1) * sizeof (bool), ALLOCATE_CLEAR, 0));
+    if (shape.nArcs > 0) {
+        shapeData.parcs = reinterpret_cast<API_PolyArc**> (BMAllocateHandle (shape.nArcs * sizeof (API_PolyArc), ALLOCATE_CLEAR, 0));
+    }
+
+    for (Int32 i = 0; i < nPoints; ++i) {
+        (*shapeData.coords)[i + 1] = Get2DCoordinateFromObjectState (coordinates[i]);
+        (*shapeData.bodyFlags)[i + 1] = true;
+    }
+    (*shapeData.coords)[shape.nCoords] = (*shapeData.coords)[1];
+    (*shapeData.bodyFlags)[nPoints] = closed;
+    (*shapeData.bodyFlags)[shape.nCoords] = (*shapeData.bodyFlags)[1];
+    (*shapeData.pends)[1] = shape.nCoords;
+    for (Int32 i = 0; i < shape.nArcs; ++i) {
+        (*shapeData.parcs)[i] = polyArcs[i];
+    }
+    return {};
+}
+
+GS::Optional<GS::UniString> FillShellContour (const GS::ObjectState& polygon, const API_Tranmat& defaultPlane, API_ShellContourData& contour)
+{
+    GS::Array<GS::ObjectState> coordinates;
+    GS::Array<GS::ObjectState> arcs;
+    polygon.Get ("coordinates", coordinates);
+    polygon.Get ("arcs", arcs);
+    if (coordinates.GetSize () > 1 && IsSame2DCoordinate (coordinates.GetFirst (), coordinates.GetLast ())) {
+        coordinates.Pop ();
+    }
+    const Int32 nPoints = (Int32) coordinates.GetSize ();
+    if (nPoints < 3) {
+        return GS::UniString ("A shell contour or hole polygon needs at least 3 coordinates.");
+    }
+
+    contour.poly.nCoords = nPoints + 1;
+    contour.poly.nSubPolys = 1;
+
+    GS::Array<API_PolyArc> polyArcs;
+    auto arcError = GetShellPolyArcs (arcs, contour.poly.nCoords, polyArcs);
+    if (arcError.HasValue ()) {
+        return arcError;
+    }
+    contour.poly.nArcs = (Int32) polyArcs.GetSize ();
+
+    contour.coords = reinterpret_cast<API_Coord**> (BMAllocateHandle ((contour.poly.nCoords + 1) * sizeof (API_Coord), ALLOCATE_CLEAR, 0));
+    contour.pends = reinterpret_cast<Int32**> (BMAllocateHandle ((contour.poly.nSubPolys + 1) * sizeof (Int32), ALLOCATE_CLEAR, 0));
+    if (contour.poly.nArcs > 0) {
+        contour.parcs = reinterpret_cast<API_PolyArc**> (BMAllocateHandle (contour.poly.nArcs * sizeof (API_PolyArc), ALLOCATE_CLEAR, 0));
+    }
+    for (Int32 i = 0; i < nPoints; ++i) {
+        (*contour.coords)[i + 1] = Get2DCoordinateFromObjectState (coordinates[i]);
+    }
+    (*contour.coords)[contour.poly.nCoords] = (*contour.coords)[1];
+    (*contour.pends)[1] = contour.poly.nCoords;
+    for (Int32 i = 0; i < contour.poly.nArcs; ++i) {
+        (*contour.parcs)[i] = polyArcs[i];
+    }
+
+    contour.plane = defaultPlane;
+    return ApplyCoordinateSystem3D (polygon, "plane", contour.plane);
+}
+
+GS::Optional<GS::UniString> ApplyShellClassParameters (API_Element& element, API_ElementMemo& memo, const GS::ObjectState& parameters)
+{
+    const GS::ObjectState* profile = parameters.Get ("profile");
+    if (profile == nullptr) {
+        return GS::UniString ("Missing required 'profile' field.");
+    }
+
+    switch (element.shell.shellClass) {
+        case API_ExtrudedShellID: {
+            API_ExtrudedShellData& extruded = element.shell.u.extrudedShell;
+            const auto extrusionVector = GetOptionalCoordinate3D (parameters, "extrusionVector");
+            if (!extrusionVector.HasValue ()) {
+                return GS::UniString ("An extruded shell needs 'extrusionVector'.");
+            }
+            extruded.extrusionVector.x = extrusionVector.Get ().x;
+            extruded.extrusionVector.y = extrusionVector.Get ().y;
+            extruded.extrusionVector.z = extrusionVector.Get ().z;
+            const auto extrusionStart = GetOptionalCoordinate3D (parameters, "extrusionStart");
+            if (extrusionStart.HasValue ()) {
+                extruded.begC = extrusionStart.Get ();
+            }
+            parameters.Get ("slantAngle", extruded.slantAngle);
+            parameters.Get ("shapePlaneTilt", extruded.shapePlaneTilt);
+            parameters.Get ("begPlaneTilt", extruded.begPlaneTilt);
+            parameters.Get ("endPlaneTilt", extruded.endPlaneTilt);
+            return FillShellShape (*profile, extruded.shellShape, memo.shellShapes[0]);
+        }
+        case API_RevolvedShellID: {
+            API_RevolvedShellData& revolved = element.shell.u.revolvedShell;
+            // The DevKit's Do_CreateRevolvedShell axis: the base plane's Y axis.
+            revolved.axisBase = {};
+            revolved.axisBase.tmx[0] = 1.0;
+            revolved.axisBase.tmx[6] = 1.0;
+            revolved.axisBase.tmx[9] = -1.0;
+            auto axisError = ApplyCoordinateSystem3D (parameters, "axis", revolved.axisBase);
+            if (axisError.HasValue ()) {
+                return axisError;
+            }
+            revolved.revolutionAngle = 2.0 * HalfTurn;
+            revolved.distortionAngle = HalfTurn / 2.0;
+            revolved.segmentType = APIShellBase_SegmentsByCircle;
+            if (revolved.segmentsByCircle < 3) {
+                revolved.segmentsByCircle = 36;
+            }
+            parameters.Get ("revolutionAngle", revolved.revolutionAngle);
+            parameters.Get ("beginAngle", revolved.begAngle);
+            parameters.Get ("slantAngle", revolved.slantAngle);
+            parameters.Get ("distortionAngle", revolved.distortionAngle);
+            Int32 segments = 0;
+            if (parameters.Get ("segmentsByCircle", segments)) {
+                revolved.segmentsByCircle = segments;
+            }
+            return FillShellShape (*profile, revolved.shellShape, memo.shellShapes[0]);
+        }
+        case API_RuledShellID: {
+            API_RuledShellData& ruled = element.shell.u.ruledShell;
+            const GS::ObjectState* secondProfile = parameters.Get ("secondProfile");
+            if (secondProfile == nullptr || parameters.Get ("profilePlane") == nullptr || parameters.Get ("secondProfilePlane") == nullptr) {
+                return GS::UniString ("A ruled shell needs 'secondProfile', 'profilePlane' and 'secondProfilePlane'.");
+            }
+            ruled.plane1 = GetIdentityTranmat ();
+            ruled.plane2 = GetIdentityTranmat ();
+            auto planeError = ApplyCoordinateSystem3D (parameters, "profilePlane", ruled.plane1);
+            if (!planeError.HasValue ()) {
+                planeError = ApplyCoordinateSystem3D (parameters, "secondProfilePlane", ruled.plane2);
+            }
+            if (planeError.HasValue ()) {
+                return planeError;
+            }
+            GS::UniString morphingRule;
+            if (parameters.Get ("morphingRule", morphingRule)) {
+                ruled.morphingRule = morphingRule == "Smooth" ? APIMorphingRule_Smooth : APIMorphingRule_Paired;
+            }
+            auto shapeError = FillShellShape (*profile, ruled.shellShape1, memo.shellShapes[0]);
+            if (shapeError.HasValue ()) {
+                return shapeError;
+            }
+            return FillShellShape (*secondProfile, ruled.shellShape2, memo.shellShapes[1]);
+        }
+    }
+    return GS::UniString ("Unknown 'shellClass'.");
+}
+
+GS::Optional<GS::UniString> ApplyShellCutPolygons (API_Element& element, API_ElementMemo& memo, const GS::ObjectState& parameters)
+{
+    const GS::ObjectState* contour = parameters.Get ("contour");
+    GS::Array<GS::ObjectState> holes;
+    parameters.Get ("holes", holes);
+
+    element.shell.hasContour = contour != nullptr;
+    element.shell.numHoles = holes.GetSize ();
+    const USize nContours = element.shell.numHoles + (element.shell.hasContour ? 1 : 0);
+    if (nContours == 0) {
+        return {};
+    }
+
+    memo.shellContours = reinterpret_cast<API_ShellContourData*> (BMAllocatePtr (nContours * sizeof (API_ShellContourData), ALLOCATE_CLEAR, 0));
+    UIndex index = 0;
+    if (contour != nullptr) {
+        auto error = FillShellContour (*contour, GetIdentityTranmat (), memo.shellContours[index++]);
+        if (error.HasValue ()) {
+            return error;
+        }
+    }
+    for (UIndex i = 0; i < holes.GetSize (); ++i) {
+        API_ShellContourData& hole = memo.shellContours[index++];
+        auto error = FillShellContour (holes[i], GetIdentityTranmat (), hole);
+        if (error.HasValue ()) {
+            return error;
+        }
+        holes[i].Get ("depth", hole.height);
+        hole.id = i + 1;
+    }
+    return {};
+}
+
+} // namespace
+
+CreateShellsCommand::CreateShellsCommand () :
+    CreateElementsCommandBase ("CreateShells", API_ShellID, "shellsData")
+{
+}
+
+GS::Optional<GS::UniString> CreateShellsCommand::GetInputParametersSchema () const
+{
+    return R"({
+    "type": "object",
+    "properties": {
+        "shellsData": {
+            "type": "array",
+            "description": "Array of data to create Shells.",
+            "items": {
+                "type": "object",
+                "description": "The parameters of the new Shell.",
+                "properties": {
+                    "favoriteName": {
+                        "type": "string",
+                        "description": "Optional name of a Shell favorite to base the new element on. Its settings are applied first, then the explicitly given fields override them."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Optional Element ID of the new element. When omitted the element gets the next automatic ID of its tool."
+                    },
+                    "shellClass": {
+                        "type": "string",
+                        "enum": ["Extruded", "Revolved", "Ruled"],
+                        "description": "Extruded: 'profile' swept along 'extrusionVector'. Revolved: 'profile' turned around 'axis'. Ruled: a surface ruled between 'profile' and 'secondProfile'."
+                    },
+                    "floorIndex": {
+                        "type": "integer",
+                        "description": "Optional story index of the shell. Without it the shell is placed on the story of the Shell tool defaults."
+                    },
+                    "basePlane": {
+                        "$ref": "#/CoordinateSystem3D",
+                        "description": "Base plane of the shell, in project coordinates; the profiles, the extrusion, the axis and the contour and hole polygons are given in it. The project axes by default, except for a Revolved shell, whose default base plane stands upright (its Y axis is the project Z axis), so the profile's x is the radius and its y the height."
+                    },
+                    "profile": {
+                        "$ref": "#/ShellProfile",
+                        "description": "The profile polyline. Extruded: in the plane across the extrusion, x horizontal and y up. Revolved: in the base plane's XY plane. Ruled: in the XY plane of 'profilePlane'."
+                    },
+                    "thickness": {
+                        "type": "number",
+                        "exclusiveMinimum": 0.0,
+                        "description": "Only takes effect on a Basic shell; a Composite shell takes its thickness from the composite."
+                    },
+                    "isFlipped": {
+                        "type": "boolean",
+                        "description": "Applies the thickness to the other side of the reference surface."
+                    },
+                    "structureType": {
+                        "$ref": "#/RoofStructureType"
+                    },
+                    "buildingMaterialId": { "$ref": "#/AttributeId" },
+                    "compositeId": { "$ref": "#/AttributeId" },
+                    "extrusionVector": {
+                        "$ref": "#/Coordinate3D",
+                        "description": "Extruded only, required: the direction and length of the extrusion, in base plane coordinates."
+                    },
+                    "extrusionStart": {
+                        "$ref": "#/Coordinate3D",
+                        "description": "Extruded only: the point the extrusion starts from, in base plane coordinates."
+                    },
+                    "shapePlaneTilt": {
+                        "type": "number",
+                        "description": "Extruded only: tilt of the profile's plane, in radians."
+                    },
+                    "begPlaneTilt": {
+                        "type": "number",
+                        "description": "Extruded only: tilt of the start plane of the extrusion, in radians."
+                    },
+                    "endPlaneTilt": {
+                        "type": "number",
+                        "description": "Extruded only: tilt of the end plane of the extrusion, in radians."
+                    },
+                    "slantAngle": {
+                        "type": "number",
+                        "description": "Extruded and Revolved: slant of the extrusion vector or of the profile, in radians."
+                    },
+                    "axis": {
+                        "$ref": "#/CoordinateSystem3D",
+                        "description": "Revolved only: the coordinate system whose Z axis the profile is turned around, in base plane coordinates. By default the base plane's Y axis."
+                    },
+                    "revolutionAngle": {
+                        "type": "number",
+                        "description": "Revolved only: the angle the profile is turned through, in radians. 2*pi (a full turn) by default."
+                    },
+                    "beginAngle": {
+                        "type": "number",
+                        "description": "Revolved only: the angle the revolution starts at, in radians."
+                    },
+                    "distortionAngle": {
+                        "type": "number",
+                        "description": "Revolved only: shear of the revolution, in radians. pi/2 (no shear) by default."
+                    },
+                    "segmentsByCircle": {
+                        "type": "integer",
+                        "minimum": 3,
+                        "description": "Revolved only: the number of segments a full circle is resolved into."
+                    },
+                    "secondProfile": {
+                        "$ref": "#/ShellProfile",
+                        "description": "Ruled only, required: the second profile polyline, in the XY plane of 'secondProfilePlane'."
+                    },
+                    "profilePlane": {
+                        "$ref": "#/CoordinateSystem3D",
+                        "description": "Ruled only, required: the plane of 'profile', in base plane coordinates."
+                    },
+                    "secondProfilePlane": {
+                        "$ref": "#/CoordinateSystem3D",
+                        "description": "Ruled only, required: the plane of 'secondProfile', in base plane coordinates."
+                    },
+                    "morphingRule": {
+                        "type": "string",
+                        "enum": ["Paired", "Smooth"],
+                        "description": "Ruled only: how the two profiles are joined, segment by segment (Paired) or smoothly."
+                    },
+                    "contour": {
+                        "$ref": "#/ShellCutPolygon",
+                        "description": "Optional clipping contour: only the part of the shell inside this polygon, seen along the Z axis of its plane, is kept. Its 'depth' is ignored."
+                    },
+                    "holes": {
+                        "type": "array",
+                        "description": "Optional holes, each cut by its polygon extruded 'depth' along the Z axis of its plane.",
+                        "items": { "$ref": "#/ShellCutPolygon" }
+                    }
+                },
+                "additionalProperties": false,
+                "required": ["shellClass", "profile"]
+            }
+        }
+    },
+    "additionalProperties": false,
+    "required": ["shellsData"]
+})";
+}
+
+GS::Optional<GS::ObjectState> CreateShellsCommand::SetTypeSpecificParameters (API_Element& element, API_ElementMemo& memo, const Stories& /*stories*/, const GS::ObjectState& parameters) const
+{
+    GS::UniString shellClass;
+    parameters.Get ("shellClass", shellClass);
+    if (shellClass == "Extruded") {
+        element.shell.shellClass = API_ExtrudedShellID;
+    } else if (shellClass == "Revolved") {
+        element.shell.shellClass = API_RevolvedShellID;
+    } else if (shellClass == "Ruled") {
+        element.shell.shellClass = API_RuledShellID;
+    } else {
+        return CreateErrorResponse (APIERR_BADPARS, "Invalid 'shellClass'. Use 'Extruded', 'Revolved' or 'Ruled'.");
+    }
+
+    // The class-specific union members are only filled by defaults read for that class, as in the
+    // DevKit's shell samples, which also start from an empty memo.
+    GSErrCode err = ACAPI_Element_GetDefaults (&element, nullptr);
+    if (err != NoError) {
+        return CreateErrorResponse (err, "Failed to read the Shell defaults.");
+    }
+    ACAPI_DisposeElemMemoHdls (&memo);
+    memo = {};
+
+    parameters.Get ("floorIndex", element.header.floorInd);
+
+    if (element.shell.shellClass == API_RevolvedShellID) {
+        element.shell.basePlane = {};
+        element.shell.basePlane.tmx[0] = 1.0;
+        element.shell.basePlane.tmx[9] = 1.0;
+        element.shell.basePlane.tmx[6] = -1.0;
+    } else {
+        element.shell.basePlane = GetIdentityTranmat ();
+    }
+    auto error = ApplyCoordinateSystem3D (parameters, "basePlane", element.shell.basePlane);
+    if (error.HasValue ()) {
+        return CreateErrorResponse (APIERR_BADPARS, error.Get ());
+    }
+
+    bool structureApplied = false;
+    error = ApplyShellBaseStructure (element.shell.shellBase, parameters, structureApplied);
+    if (error.HasValue ()) {
+        return CreateErrorResponse (APIERR_BADPARS, error.Get ());
+    }
+    parameters.Get ("thickness", element.shell.shellBase.thickness);
+    parameters.Get ("isFlipped", element.shell.isFlipped);
+
+    error = ApplyShellClassParameters (element, memo, parameters);
+    if (!error.HasValue ()) {
+        error = ApplyShellCutPolygons (element, memo, parameters);
+    }
+    if (error.HasValue ()) {
+        return CreateErrorResponse (APIERR_BADPARS, "Invalid shell geometry: " + error.Get ());
+    }
+
+    return {};
+}
+
+CreateRailingsCommand::CreateRailingsCommand () :
+    CreateElementsCommandBase ("CreateRailings", API_RailingID, "railingsData")
+{
+}
+
+GS::Optional<GS::UniString> CreateRailingsCommand::GetInputParametersSchema () const
+{
+    return R"({
+    "type": "object",
+    "properties": {
+        "railingsData": {
+            "type": "array",
+            "description": "Array of data to create Railings.",
+            "items": {
+                "type": "object",
+                "description": "The parameters of the new Railing. Its segments, posts, rails and panels come from the Railing tool defaults, or from the favorite named in favoriteName.",
+                "properties": {
+                    "favoriteName": {
+                        "type": "string",
+                        "description": "Optional name of a Railing favorite to base the new element on, with its segment, post, rail and panel settings."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Optional Element ID of the new element. When omitted the element gets the next automatic ID of its tool."
+                    },
+                    "floorIndex": {
+                        "type": "integer",
+                        "description": "Optional story index of the railing. Without it the railing is placed on the story of the Railing tool defaults."
+                    },
+                    "polylineCoordinates": {
+                        "type": "array",
+                        "description": "The nodes of the railing's reference line; z is the elevation of the node above the railing's story.",
+                        "items": { "$ref": "#/Coordinate3D" },
+                        "minItems": 2
+                    },
+                    "polylineArcs": {
+                        "type": "array",
+                        "description": "Arc segments of the reference line, with indices into polylineCoordinates.",
+                        "items": { "$ref": "#/PolyArc" }
+                    }
+                },
+                "additionalProperties": false,
+                "required": ["polylineCoordinates"]
+            }
+        }
+    },
+    "additionalProperties": false,
+    "required": ["railingsData"]
+})";
+}
+
+GS::Optional<GS::ObjectState> CreateRailingsCommand::SetTypeSpecificParameters (API_Element& element, API_ElementMemo& memo, const Stories& /*stories*/, const GS::ObjectState& parameters) const
+{
+    GS::Array<GS::ObjectState> coordinates;
+    GS::Array<GS::ObjectState> arcs;
+    parameters.Get ("polylineCoordinates", coordinates);
+    parameters.Get ("polylineArcs", arcs);
+    const Int32 nCoords = (Int32) coordinates.GetSize ();
+    if (nCoords < 2) {
+        return CreateErrorResponse (APIERR_BADPARS, "'polylineCoordinates' must contain at least 2 coordinates.");
+    }
+    const GS::Array<API_PolyArc> polyArcs = GetPolyArcs (arcs, 1);
+    for (const API_PolyArc& arc : polyArcs) {
+        if (arc.begIndex < 1 || arc.endIndex < 1 || arc.begIndex > nCoords || arc.endIndex > nCoords) {
+            return CreateErrorResponse (APIERR_BADPARS, "An index of 'polylineArcs' is outside 'polylineCoordinates'.");
+        }
+    }
+
+    parameters.Get ("floorIndex", element.header.floorInd);
+
+    // The reference line replaces whatever the defaults' memo held; the railing's segment, post,
+    // rail and panel definitions in the same memo are kept, as Do_CreateRailing in the DevKit does.
+    if (memo.coords != nullptr) {
+        BMKillHandle (reinterpret_cast<GSHandle*> (&memo.coords));
+    }
+    if (memo.parcs != nullptr) {
+        BMKillHandle (reinterpret_cast<GSHandle*> (&memo.parcs));
+    }
+    if (memo.polyZCoords != nullptr) {
+        BMKillHandle (reinterpret_cast<GSHandle*> (&memo.polyZCoords));
+    }
+    memo.coords = reinterpret_cast<API_Coord**> (BMAllocateHandle ((nCoords + 1) * sizeof (API_Coord), ALLOCATE_CLEAR, 0));
+    memo.polyZCoords = reinterpret_cast<double**> (BMAllocateHandle ((nCoords + 1) * sizeof (double), ALLOCATE_CLEAR, 0));
+    if (!polyArcs.IsEmpty ()) {
+        memo.parcs = reinterpret_cast<API_PolyArc**> (BMAllocateHandle (polyArcs.GetSize () * sizeof (API_PolyArc), ALLOCATE_CLEAR, 0));
+        for (UIndex i = 0; i < polyArcs.GetSize (); ++i) {
+            (*memo.parcs)[i] = polyArcs[i];
+        }
+    }
+    for (Int32 i = 0; i < nCoords; ++i) {
+        const API_Coord3D coord = Get3DCoordinateFromObjectState (coordinates[i]);
+        (*memo.coords)[i + 1] = { coord.x, coord.y };
+        (*memo.polyZCoords)[i + 1] = coord.z;
+    }
+    element.railing.nVertices = nCoords;
+
+    return {};
+}
+
+CreateSkylightsCommand::CreateSkylightsCommand () :
+    CreateElementsCommandBase ("CreateSkylights", API_SkylightID, "skylightsData")
+{
+}
+
+GS::Optional<GS::UniString> CreateSkylightsCommand::GetInputParametersSchema () const
+{
+    return R"({
+    "type": "object",
+    "properties": {
+        "skylightsData": {
+            "type": "array",
+            "description": "Array of data to create Skylights.",
+            "items": {
+                "type": "object",
+                "description": "The parameters of the new Skylight.",
+                "properties": {
+                    "favoriteName": {
+                        "type": "string",
+                        "description": "Optional name of a Skylight favorite to base the new element on."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Optional Element ID of the new element. When omitted the element gets the next automatic ID of its tool."
+                    },
+                    "ownerId": {
+                        "$ref": "#/ElementId",
+                        "description": "The roof (single- or multi-plane) or shell the skylight is placed in."
+                    },
+                    "anchorPosition": {
+                        "$ref": "#/Coordinate2D",
+                        "description": "Floor plan position of the skylight's anchor point. The skylight is placed on the owner's surface above it and turned to its slope; in a multi-plane roof that is the roof plane over this position."
+                    },
+                    "anchorPoint": {
+                        "type": "string",
+                        "enum": ["BottomCenter", "BottomLeft", "BottomRight", "TopCenter", "TopLeft", "TopRight"],
+                        "description": "Which point of the skylight anchorPosition places."
+                    },
+                    "width": { "type": "number", "exclusiveMinimum": 0.0 },
+                    "height": { "type": "number", "exclusiveMinimum": 0.0 },
+                    "libraryPartName": {
+                        "type": "string",
+                        "description": "Optional localized name of a skylight library part to place instead of the tool default's."
+                    }
+                },
+                "additionalProperties": false,
+                "required": ["ownerId", "anchorPosition"]
+            }
+        }
+    },
+    "additionalProperties": false,
+    "required": ["skylightsData"]
+})";
+}
+
+GS::Optional<GS::ObjectState> CreateSkylightsCommand::SetTypeSpecificParameters (API_Element& element, API_ElementMemo& memo, const Stories& /*stories*/, const GS::ObjectState& parameters) const
+{
+    const GS::ObjectState* ownerId = parameters.Get ("ownerId");
+    const API_Guid ownerGuid = ownerId != nullptr ? GetGuidFromObjectState (*ownerId) : APINULLGuid;
+    if (!DoesElementExist (ownerGuid, API_RoofID) && !DoesElementExist (ownerGuid, API_ShellID)) {
+        return CreateErrorResponse (APIERR_BADID, "'ownerId' is not a roof or a shell.");
+    }
+    element.skylight.owner = ownerGuid;
+
+    const auto anchorPosition = GetOptionalCoordinate2D (parameters, "anchorPosition");
+    if (anchorPosition.HasValue ()) {
+        element.skylight.anchorPosition = anchorPosition.Get ();
+    }
+
+    GS::UniString anchorPoint;
+    if (parameters.Get ("anchorPoint", anchorPoint)) {
+        static const std::pair<const char*, API_SkylightAnchorID> anchors[] = {
+            { "BottomCenter", APISkylightAnchor_BC }, { "BottomLeft", APISkylightAnchor_BL }, { "BottomRight", APISkylightAnchor_BR },
+            { "TopCenter", APISkylightAnchor_TC }, { "TopLeft", APISkylightAnchor_TL }, { "TopRight", APISkylightAnchor_TR }
+        };
+        for (const auto& anchor : anchors) {
+            if (anchorPoint == anchor.first) {
+                element.skylight.anchorPoint = anchor.second;
+            }
+        }
+    }
+
+    const auto width = GetOptionalDouble (parameters, "width");
+    if (width.HasValue ()) {
+        element.skylight.openingBase.width = width.Get ();
+    }
+    const auto height = GetOptionalDouble (parameters, "height");
+    if (height.HasValue ()) {
+        element.skylight.openingBase.height = height.Get ();
+    }
+
+    GS::UniString libraryPartName;
+    if (parameters.Get ("libraryPartName", libraryPartName) && !libraryPartName.IsEmpty ()) {
+        API_LibPart libPart = {};
+        libPart.typeID = APILib_SkylightID;
+        GS::ucscpy (libPart.docu_UName, libraryPartName.ToUStr ());
+        GSErrCode err = ACAPI_LibraryPart_Search (&libPart, false, true);
+        delete libPart.location;
+        if (err != NoError) {
+            return CreateErrorResponse (err, "Failed to resolve 'libraryPartName': no skylight library part with that name.");
+        }
+        double a = 0.0;
+        double b = 0.0;
+        Int32 addParNum = 0;
+        API_AddParType** addPars = nullptr;
+        err = ACAPI_LibraryPart_GetParams (libPart.index, &a, &b, &addParNum, &addPars);
+        if (err != NoError) {
+            return CreateErrorResponse (err, "Failed to read the parameters of 'libraryPartName'.");
+        }
+        if (memo.params != nullptr) {
+            ACAPI_DisposeAddParHdl (&memo.params);
+        }
+        memo.params = addPars;
+        element.skylight.openingBase.libInd = libPart.index;
+    }
+
+    return {};
+}
+
 SolveStairBaselineCommand::SolveStairBaselineCommand () :
     CommandBase (CommonSchema::Used)
 {
@@ -4694,7 +5413,8 @@ GS::ObjectState CreateWindowsCommand::Execute (const GS::ObjectState& parameters
                 continue;
             }
 
-            err = PrepareWindowOrDoorDefaults (API_WindowID, element, memo, marker);
+            bool withMarker = true;
+            err = PrepareWindowOrDoorDefaults (API_WindowID, element, memo, marker, withMarker);
             if (err != NoError) {
                 elements.Push (CreateErrorResponse (err, "Failed to prepare window defaults."));
                 continue;
@@ -4729,7 +5449,9 @@ GS::ObjectState CreateWindowsCommand::Execute (const GS::ObjectState& parameters
                 element.window.openingBase.oSide = oSide;
             }
 
-            err = ACAPI_Element_CreateExt (&element, &memo, 1UL, &marker);
+            err = withMarker
+                ? ACAPI_Element_CreateExt (&element, &memo, 1UL, &marker)
+                : ACAPI_Element_Create (&element, &memo);
             if (err != NoError) {
                 // The switch above should have ruled this one out, but say what it means
                 // if Archicad still refuses the database - #532 was reported for a year as
@@ -4875,7 +5597,8 @@ GS::ObjectState CreateDoorsCommand::Execute (const GS::ObjectState& parameters, 
                 continue;
             }
 
-            err = PrepareWindowOrDoorDefaults (API_DoorID, element, memo, marker);
+            bool withMarker = true;
+            err = PrepareWindowOrDoorDefaults (API_DoorID, element, memo, marker, withMarker);
             if (err != NoError) {
                 elements.Push (CreateErrorResponse (err, "Failed to prepare door defaults."));
                 continue;
@@ -4910,7 +5633,9 @@ GS::ObjectState CreateDoorsCommand::Execute (const GS::ObjectState& parameters, 
                 element.window.openingBase.oSide = oSide;
             }
 
-            err = ACAPI_Element_CreateExt (&element, &memo, 1UL, &marker);
+            err = withMarker
+                ? ACAPI_Element_CreateExt (&element, &memo, 1UL, &marker)
+                : ACAPI_Element_Create (&element, &memo);
             if (err != NoError) {
                 // See the same spot in CreateWindowsCommand::Execute.
                 GS::UniString errorMessage = "Failed to create door.";
