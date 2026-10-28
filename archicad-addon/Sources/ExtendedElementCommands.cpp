@@ -4621,7 +4621,7 @@ GS::Optional<GS::UniString> CreateShellsCommand::GetInputParametersSchema () con
                     },
                     "basePlane": {
                         "$ref": "#/CoordinateSystem3D",
-                        "description": "Base plane of the shell, in project coordinates; the profiles, the extrusion and the axis are given in it. The project axes by default, except for a Revolved shell, whose default base plane stands upright (its Y axis is the project Z axis), so the profile's x is the radius and its y the height."
+                        "description": "Base plane of the shell, in project coordinates; the profiles, the extrusion, the axis and the contour and hole polygons are given in it. The project axes by default, except for a Revolved shell, whose default base plane stands upright (its Y axis is the project Z axis), so the profile's x is the radius and its y the height."
                     },
                     "profile": {
                         "$ref": "#/ShellProfile",
@@ -4705,11 +4705,11 @@ GS::Optional<GS::UniString> CreateShellsCommand::GetInputParametersSchema () con
                     },
                     "contour": {
                         "$ref": "#/ShellCutPolygon",
-                        "description": "Optional clipping contour, in floor plan coordinates: only the part of the shell above or below this polygon is kept. Its 'plane' and 'depth' are ignored."
+                        "description": "Optional clipping contour: only the part of the shell inside this polygon, seen along the Z axis of its plane, is kept. Its 'depth' is ignored."
                     },
                     "holes": {
                         "type": "array",
-                        "description": "Optional holes, each cut by the polygon (in floor plan coordinates) extruded 'depth' from its 'plane', vertically by default.",
+                        "description": "Optional holes, each cut by its polygon extruded 'depth' along the Z axis of its plane.",
                         "items": { "$ref": "#/ShellCutPolygon" }
                     }
                 },
@@ -4917,10 +4917,6 @@ GS::Optional<GS::UniString> CreateSkylightsCommand::GetInputParametersSchema () 
                         "enum": ["BottomCenter", "BottomLeft", "BottomRight", "TopCenter", "TopLeft", "TopRight"],
                         "description": "Which point of the skylight anchorPosition places."
                     },
-                    "azimuthAngle": {
-                        "type": "number",
-                        "description": "Rotation of the skylight in the horizontal plane, clockwise, in radians."
-                    },
                     "width": { "type": "number", "exclusiveMinimum": 0.0 },
                     "height": { "type": "number", "exclusiveMinimum": 0.0 },
                     "libraryPartName": {
@@ -4951,7 +4947,6 @@ GS::Optional<GS::ObjectState> CreateSkylightsCommand::SetTypeSpecificParameters 
     if (anchorPosition.HasValue ()) {
         element.skylight.anchorPosition = anchorPosition.Get ();
     }
-    parameters.Get ("azimuthAngle", element.skylight.azimuthAngle);
 
     GS::UniString anchorPoint;
     if (parameters.Get ("anchorPoint", anchorPoint)) {

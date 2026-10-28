@@ -31,7 +31,18 @@ aclib.RunTapirCommand (
                     'coordinates': [{'x': 4.0, 'y': 0.0}, {'x': 0.0, 'y': 4.0}],
                     'arcs': [{'begIndex': 0, 'endIndex': 1, 'arcAngle': math.pi / 2}]
                 },
-                'holes': [{'coordinates': circle (15.0, 4.0, 1.0), 'depth': 10.0}]
+                # The dome's base plane stands upright, so the oculus is drawn in a horizontal plane inside it.
+                'holes': [
+                    {
+                        'coordinates': circle (0.0, 0.0, 1.0),
+                        'plane': {
+                            'xAxis': {'x': 1.0, 'y': 0.0, 'z': 0.0},
+                            'yAxis': {'x': 0.0, 'y': 0.0, 'z': -1.0},
+                            'zAxis': {'x': 0.0, 'y': 1.0, 'z': 0.0}
+                        },
+                        'depth': 6.0
+                    }
+                ]
             },
             {
                 'shellClass': 'Ruled',
