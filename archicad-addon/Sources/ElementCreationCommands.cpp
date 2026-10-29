@@ -331,7 +331,7 @@ GS::Optional<GS::UniString> CreateColumnsCommand::GetInputParametersSchema () co
                         },
                         "segmentSchemes": {
                             "type": "array",
-                            "description": "Optional length scheme of each segment, one item per segment of the column. By default every segment gets an equal Proportional share of the column, as a column placed with the Column tool does, also when favoriteName is given.",
+                            "description": "Optional length scheme of each segment, one item per segment of the column. A column of one segment is stored Proportional 1.0, as the Column tool stores it, whatever is given here: Archicad rewrites any other scheme of a single segment. A column of several segments (from a favorite) keeps its favorite's schemes unless they are given.",
                             "items": {
                                 "$ref": "#/AssemblySegmentScheme"
                             },
@@ -432,9 +432,10 @@ GS::Optional<GS::ObjectState> CreateColumnsCommand::SetTypeSpecificParameters (A
 }
 
 // ACAPI_Element_Create keeps the defaults' scheme whatever the memo holds: a single segment Fixed at
-// the column's height, which the Column tool never stores. A column placed in the Archicad 30 GUI is
-// Proportional 1.0, so the schemes are written once the column exists, as the DevKit's
-// Element_Modify_ChangeParameters does (ENG-11342).
+// the column's height, which the Column tool never stores. A one-segment column placed in the
+// Archicad 30 GUI is Proportional 1.0, and Archicad rewrites any scheme written to it later to that,
+// so the schemes are written once the column exists, as the DevKit's Element_Modify_ChangeParameters
+// does. A column of several segments keeps its favorite's schemes unless they are given (ENG-11342).
 GS::Optional<GS::UniString> CreateColumnsCommand::SetParametersAfterCreation (const API_Guid& elemGuid, const GS::ObjectState& parameters) const
 {
     constexpr UInt64 segmentMemoMask = APIMemoMask_ColumnSegment | APIMemoMask_AssemblySegmentCut | APIMemoMask_AssemblySegmentScheme;
@@ -452,6 +453,9 @@ GS::Optional<GS::UniString> CreateColumnsCommand::SetParametersAfterCreation (co
     const UInt32 nSchemes = element.column.nSchemes;
     GS::Array<GS::ObjectState> schemes;
     const bool hasSchemes = parameters.Get ("segmentSchemes", schemes);
+    if (!hasSchemes && nSchemes > 1) {
+        return {};
+    }
     if (hasSchemes && schemes.GetSize () != nSchemes) {
         return GS::UniString::Printf ("'segmentSchemes' has %u items, but the new column has %u schemes", schemes.GetSize (), nSchemes);
     }
