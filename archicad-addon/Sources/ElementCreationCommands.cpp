@@ -154,6 +154,13 @@ GS::ObjectState	CreateElementsCommandBase::Execute (const GS::ObjectState& param
                 continue;
             }
 
+            const GS::Optional<GS::UniString> afterCreationError = SetParametersAfterCreation (element.header.guid, data);
+            if (afterCreationError.HasValue ()) {
+                ACAPI_Element_Delete ({ element.header.guid });
+                elements (CreateErrorResponse (APIERR_GENERAL, afterCreationError.Get () + ", so the new " + elemTypeName + " was not created."));
+                continue;
+            }
+
             // Per-item "id" support: the Element ID is written right after the creation, in
             // the same undoable command, so the create call itself stays as it was. Without
             // an id the element keeps the next automatic ID of its tool. An id that cannot be
@@ -199,54 +206,23 @@ GS::ObjectState	CreateElementsCommandBase::Execute (const GS::ObjectState& param
     return response;
 }
 
-// The tool defaults' memo gives a single segment a Fixed scheme as long as the column, which the
-// Column tool never stores: a column placed in the Archicad 30 GUI is Proportional 1.0 (ENG-11342).
-static GS::Optional<GS::ObjectState> SetColumnSegmentSchemes (API_Element& element, API_ElementMemo& memo, const GS::ObjectState& parameters)
+static GS::Optional<GS::ObjectState> CheckColumnSegmentSchemes (const API_Element& element, const GS::ObjectState& parameters)
 {
-    const UInt32 nSegments = element.column.nSegments;
-    if (nSegments == 0) {
+    GS::Array<GS::ObjectState> schemes;
+    if (!parameters.Get ("segmentSchemes", schemes)) {
         return {};
     }
-
-    GS::Array<GS::ObjectState> schemes;
-    const bool hasSchemes = parameters.Get ("segmentSchemes", schemes);
-    if (hasSchemes && schemes.GetSize () != nSegments) {
+    if (schemes.GetSize () != element.column.nSegments) {
         return CreateErrorResponse (APIERR_BADPARS,
-            GS::UniString::Printf ("'segmentSchemes' has %u items, but the column has %u segments.", schemes.GetSize (), nSegments));
+            GS::UniString::Printf ("'segmentSchemes' has %u items, but the column has %u segments.", schemes.GetSize (), element.column.nSegments));
     }
-
-    if (memo.assemblySegmentSchemes != nullptr &&
-        BMGetPtrSize (reinterpret_cast<GSPtr> (memo.assemblySegmentSchemes)) / sizeof (API_AssemblySegmentSchemeData) != nSegments) {
-        BMKillPtr (reinterpret_cast<GSPtr*> (&memo.assemblySegmentSchemes));
-    }
-    if (memo.assemblySegmentSchemes == nullptr) {
-        memo.assemblySegmentSchemes = reinterpret_cast<API_AssemblySegmentSchemeData*> (
-            BMAllocatePtr (nSegments * sizeof (API_AssemblySegmentSchemeData), ALLOCATE_CLEAR, 0));
-    }
-
-    for (UInt32 i = 0; i < nSegments; ++i) {
-        API_AssemblySegmentSchemeData& scheme = memo.assemblySegmentSchemes[i];
-        scheme.lengthType = APIAssemblySegment_Proportional;
-        scheme.fixedLength = 0.0;
-        scheme.lengthProportion = 1.0 / nSegments;
-        if (!hasSchemes) {
-            continue;
-        }
+    for (const GS::ObjectState& scheme : schemes) {
         GS::UniString lengthType;
-        schemes[i].Get ("lengthType", lengthType);
-        if (lengthType == "Fixed") {
-            double fixedLength = 0.0;
-            if (!schemes[i].Get ("fixedLength", fixedLength)) {
-                return CreateErrorResponse (APIERR_BADPARS, "A Fixed segment scheme needs 'fixedLength'.");
-            }
-            scheme.lengthType = APIAssemblySegment_Fixed;
-            scheme.fixedLength = fixedLength;
-            schemes[i].Get ("lengthProportion", scheme.lengthProportion);
-        } else {
-            schemes[i].Get ("lengthProportion", scheme.lengthProportion);
+        scheme.Get ("lengthType", lengthType);
+        if (lengthType == "Fixed" && !scheme.Contains ("fixedLength")) {
+            return CreateErrorResponse (APIERR_BADPARS, "A Fixed segment scheme needs 'fixedLength'.");
         }
     }
-
     return {};
 }
 
@@ -452,7 +428,57 @@ GS::Optional<GS::ObjectState> CreateColumnsCommand::SetTypeSpecificParameters (A
         }
     }
 
-    return SetColumnSegmentSchemes (element, memo, parameters);
+    return CheckColumnSegmentSchemes (element, parameters);
+}
+
+// ACAPI_Element_Create keeps the defaults' scheme whatever the memo holds: a single segment Fixed at
+// the column's height, which the Column tool never stores. A column placed in the Archicad 30 GUI is
+// Proportional 1.0, so the schemes are written once the column exists, as the DevKit's
+// Element_Modify_ChangeParameters does (ENG-11342).
+GS::Optional<GS::UniString> CreateColumnsCommand::SetParametersAfterCreation (const API_Guid& elemGuid, const GS::ObjectState& parameters) const
+{
+    constexpr UInt64 segmentMemoMask = APIMemoMask_ColumnSegment | APIMemoMask_AssemblySegmentCut | APIMemoMask_AssemblySegmentScheme;
+
+    API_Element element = {};
+    element.header.guid = elemGuid;
+    API_ElementMemo memo = {};
+    const GS::OnExit guard ([&memo] () { ACAPI_DisposeElemMemoHdls (&memo); });
+    if (ACAPI_Element_Get (&element) != NoError ||
+        ACAPI_Element_GetMemo (elemGuid, &memo, segmentMemoMask) != NoError ||
+        memo.assemblySegmentSchemes == nullptr) {
+        return GS::UniString ("Failed to read the segment schemes of the new column");
+    }
+
+    const UInt32 nSchemes = element.column.nSchemes;
+    GS::Array<GS::ObjectState> schemes;
+    const bool hasSchemes = parameters.Get ("segmentSchemes", schemes);
+    if (hasSchemes && schemes.GetSize () != nSchemes) {
+        return GS::UniString::Printf ("'segmentSchemes' has %u items, but the new column has %u schemes", schemes.GetSize (), nSchemes);
+    }
+
+    for (UInt32 i = 0; i < nSchemes; ++i) {
+        API_AssemblySegmentSchemeData& scheme = memo.assemblySegmentSchemes[i];
+        scheme.lengthType = APIAssemblySegment_Proportional;
+        scheme.fixedLength = 0.0;
+        scheme.lengthProportion = 1.0 / nSchemes;
+        if (!hasSchemes) {
+            continue;
+        }
+        GS::UniString lengthType;
+        schemes[i].Get ("lengthType", lengthType);
+        if (lengthType == "Fixed") {
+            scheme.lengthType = APIAssemblySegment_Fixed;
+            schemes[i].Get ("fixedLength", scheme.fixedLength);
+        }
+        schemes[i].Get ("lengthProportion", scheme.lengthProportion);
+    }
+
+    API_Element mask;
+    ACAPI_ELEMENT_MASK_CLEAR (mask);
+    if (ACAPI_Element_Change (&element, &mask, &memo, segmentMemoMask, true) != NoError) {
+        return GS::UniString ("Failed to set the segment schemes of the new column");
+    }
+    return {};
 }
 
 CreateSlabsCommand::CreateSlabsCommand () :
