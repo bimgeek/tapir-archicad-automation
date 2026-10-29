@@ -2994,6 +2994,25 @@
         },
         "additionalProperties": false
     },
+    "ShellEdgeTrim": {
+        "type": "object",
+        "description": "How a shell edge is cut.",
+        "properties": {
+            "trimType": {
+                "type": "string",
+                "enum": ["Vertical", "Perpendicular", "Horizontal", "CustomAngle"],
+                "description": "Vertical, Perpendicular or Horizontal to the shell, or at 'angle' (CustomAngle)."
+            },
+            "angle": {
+                "type": "number",
+                "description": "The trim angle in radians. Only CustomAngle uses it; pi/2 by default."
+            }
+        },
+        "additionalProperties": false,
+        "required": [
+            "trimType"
+        ]
+    },
     "ShellProfile": {
         "type": "object",
         "description": "A profile polyline of a shell, in the XY plane of its coordinate system.",
