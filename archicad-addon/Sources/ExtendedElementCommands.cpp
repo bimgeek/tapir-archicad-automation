@@ -4583,6 +4583,58 @@ GS::Optional<GS::UniString> ApplyShellCutPolygons (API_Element& element, API_Ele
     return {};
 }
 
+// The Shell tool defaults hold Vertical trims at 1 degree, which the Shell tool never stores: a shell
+// drawn in the Archicad 30 GUI has every shape edge Perpendicular at pi/2 (ENG-11342).
+void ApplyShellEdgeTrim (const GS::ObjectState& parameters, const char* name, API_ContourEdgeData& edge)
+{
+    edge.edgeTrim.sideType = APIEdgeTrim_Perpendicular;
+    edge.edgeTrim.sideAngle = HalfTurn / 2.0;
+    const GS::ObjectState* trim = parameters.Get (name);
+    if (trim == nullptr) {
+        return;
+    }
+    GS::UniString trimType;
+    trim->Get ("trimType", trimType);
+    if (trimType == "Vertical") {
+        edge.edgeTrim.sideType = APIEdgeTrim_Vertical;
+    } else if (trimType == "Horizontal") {
+        edge.edgeTrim.sideType = APIEdgeTrim_Horizontal;
+    } else if (trimType == "CustomAngle") {
+        edge.edgeTrim.sideType = APIEdgeTrim_CustomAngle;
+    }
+    trim->Get ("angle", edge.edgeTrim.sideAngle);
+}
+
+void ApplyShellEdgeTrims (API_Element& element, const GS::ObjectState& parameters)
+{
+    API_ContourEdgeData* begEdge = nullptr;
+    API_ContourEdgeData* endEdge = nullptr;
+    API_ContourEdgeData* sideEdges = nullptr;
+    switch (element.shell.shellClass) {
+        case API_ExtrudedShellID:
+            begEdge = &element.shell.u.extrudedShell.begShapeEdgeData;
+            endEdge = &element.shell.u.extrudedShell.endShapeEdgeData;
+            sideEdges = element.shell.u.extrudedShell.extrudedEdgeDatas;
+            break;
+        case API_RevolvedShellID:
+            begEdge = &element.shell.u.revolvedShell.begShapeEdgeData;
+            endEdge = &element.shell.u.revolvedShell.endShapeEdgeData;
+            sideEdges = element.shell.u.revolvedShell.revolvedEdgeDatas;
+            break;
+        case API_RuledShellID:
+            begEdge = &element.shell.u.ruledShell.begShapeEdgeData;
+            endEdge = &element.shell.u.ruledShell.endShapeEdgeData;
+            sideEdges = element.shell.u.ruledShell.ruledEdgeDatas;
+            break;
+        default:
+            return;
+    }
+    ApplyShellEdgeTrim (parameters, "begShapeEdgeTrim", *begEdge);
+    ApplyShellEdgeTrim (parameters, "endShapeEdgeTrim", *endEdge);
+    ApplyShellEdgeTrim (parameters, "begSideEdgeTrim", sideEdges[0]);
+    ApplyShellEdgeTrim (parameters, "endSideEdgeTrim", sideEdges[1]);
+}
+
 } // namespace
 
 CreateShellsCommand::CreateShellsCommand () :
@@ -4711,6 +4763,22 @@ GS::Optional<GS::UniString> CreateShellsCommand::GetInputParametersSchema () con
                         "type": "array",
                         "description": "Optional holes, each cut by its polygon extruded 'depth' along the Z axis of its plane.",
                         "items": { "$ref": "#/ShellCutPolygon" }
+                    },
+                    "begShapeEdgeTrim": {
+                        "$ref": "#/ShellEdgeTrim",
+                        "description": "Optional trim of the profile's edges at the start of the shell (the start plane of an extrusion, the begin angle of a revolution, the first profile of a ruled shell). Perpendicular at pi/2 by default, as the Shell tool draws it."
+                    },
+                    "endShapeEdgeTrim": {
+                        "$ref": "#/ShellEdgeTrim",
+                        "description": "Optional trim of the profile's edges at the end of the shell. Perpendicular at pi/2 by default."
+                    },
+                    "begSideEdgeTrim": {
+                        "$ref": "#/ShellEdgeTrim",
+                        "description": "Optional trim of the edge that the profile's first point sweeps from the start to the end of the shell. Perpendicular at pi/2 by default."
+                    },
+                    "endSideEdgeTrim": {
+                        "$ref": "#/ShellEdgeTrim",
+                        "description": "Optional trim of the edge that the profile's last point sweeps. Perpendicular at pi/2 by default."
                     }
                 },
                 "additionalProperties": false,
@@ -4776,6 +4844,7 @@ GS::Optional<GS::ObjectState> CreateShellsCommand::SetTypeSpecificParameters (AP
     if (error.HasValue ()) {
         return CreateErrorResponse (APIERR_BADPARS, "Invalid shell geometry: " + error.Get ());
     }
+    ApplyShellEdgeTrims (element, parameters);
 
     return {};
 }

@@ -199,6 +199,57 @@ GS::ObjectState	CreateElementsCommandBase::Execute (const GS::ObjectState& param
     return response;
 }
 
+// The tool defaults' memo gives a single segment a Fixed scheme as long as the column, which the
+// Column tool never stores: a column placed in the Archicad 30 GUI is Proportional 1.0 (ENG-11342).
+static GS::Optional<GS::ObjectState> SetColumnSegmentSchemes (API_Element& element, API_ElementMemo& memo, const GS::ObjectState& parameters)
+{
+    const UInt32 nSegments = element.column.nSegments;
+    if (nSegments == 0) {
+        return {};
+    }
+
+    GS::Array<GS::ObjectState> schemes;
+    const bool hasSchemes = parameters.Get ("segmentSchemes", schemes);
+    if (hasSchemes && schemes.GetSize () != nSegments) {
+        return CreateErrorResponse (APIERR_BADPARS,
+            GS::UniString::Printf ("'segmentSchemes' has %u items, but the column has %u segments.", schemes.GetSize (), nSegments));
+    }
+
+    if (memo.assemblySegmentSchemes != nullptr &&
+        BMGetPtrSize (reinterpret_cast<GSPtr> (memo.assemblySegmentSchemes)) / sizeof (API_AssemblySegmentSchemeData) != nSegments) {
+        BMKillPtr (reinterpret_cast<GSPtr*> (&memo.assemblySegmentSchemes));
+    }
+    if (memo.assemblySegmentSchemes == nullptr) {
+        memo.assemblySegmentSchemes = reinterpret_cast<API_AssemblySegmentSchemeData*> (
+            BMAllocatePtr (nSegments * sizeof (API_AssemblySegmentSchemeData), ALLOCATE_CLEAR, 0));
+    }
+
+    for (UInt32 i = 0; i < nSegments; ++i) {
+        API_AssemblySegmentSchemeData& scheme = memo.assemblySegmentSchemes[i];
+        scheme.lengthType = APIAssemblySegment_Proportional;
+        scheme.fixedLength = 0.0;
+        scheme.lengthProportion = 1.0 / nSegments;
+        if (!hasSchemes) {
+            continue;
+        }
+        GS::UniString lengthType;
+        schemes[i].Get ("lengthType", lengthType);
+        if (lengthType == "Fixed") {
+            double fixedLength = 0.0;
+            if (!schemes[i].Get ("fixedLength", fixedLength)) {
+                return CreateErrorResponse (APIERR_BADPARS, "A Fixed segment scheme needs 'fixedLength'.");
+            }
+            scheme.lengthType = APIAssemblySegment_Fixed;
+            scheme.fixedLength = fixedLength;
+            schemes[i].Get ("lengthProportion", scheme.lengthProportion);
+        } else {
+            schemes[i].Get ("lengthProportion", scheme.lengthProportion);
+        }
+    }
+
+    return {};
+}
+
 CreateColumnsCommand::CreateColumnsCommand () :
     CreateElementsCommandBase ("CreateColumns", API_ColumnID, "columnsData")
 {
@@ -301,6 +352,14 @@ GS::Optional<GS::UniString> CreateColumnsCommand::GetInputParametersSchema () co
                         "floorIndex": {
                             "type": "integer",
                             "description": "Optional floor index. If omitted, derived from the coordinate's z value."
+                        },
+                        "segmentSchemes": {
+                            "type": "array",
+                            "description": "Optional length scheme of each segment, one item per segment of the column. By default every segment gets an equal Proportional share of the column, as a column placed with the Column tool does.",
+                            "items": {
+                                "$ref": "#/AssemblySegmentScheme"
+                            },
+                            "minItems": 1
                         }
                     },
                     "additionalProperties": false,
@@ -393,7 +452,7 @@ GS::Optional<GS::ObjectState> CreateColumnsCommand::SetTypeSpecificParameters (A
         }
     }
 
-    return {};
+    return SetColumnSegmentSchemes (element, memo, parameters);
 }
 
 CreateSlabsCommand::CreateSlabsCommand () :
