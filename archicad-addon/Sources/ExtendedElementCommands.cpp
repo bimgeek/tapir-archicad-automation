@@ -4766,7 +4766,7 @@ GS::Optional<GS::UniString> CreateShellsCommand::GetInputParametersSchema () con
                     },
                     "begShapeEdgeTrim": {
                         "$ref": "#/ShellEdgeTrim",
-                        "description": "Optional trim of the profile's edges at the start of the shell (the start plane of an extrusion, the begin angle of a revolution, the first profile of a ruled shell). Perpendicular at pi/2 by default, as the Shell tool draws it."
+                        "description": "Optional trim of the profile's edges at the start of the shell (the start plane of an extrusion, the begin angle of a revolution, the first profile of a ruled shell). Perpendicular at pi/2 by default, as the Shell tool draws it, also when favoriteName is given."
                     },
                     "endShapeEdgeTrim": {
                         "$ref": "#/ShellEdgeTrim",

@@ -355,7 +355,7 @@ GS::Optional<GS::UniString> CreateColumnsCommand::GetInputParametersSchema () co
                         },
                         "segmentSchemes": {
                             "type": "array",
-                            "description": "Optional length scheme of each segment, one item per segment of the column. By default every segment gets an equal Proportional share of the column, as a column placed with the Column tool does.",
+                            "description": "Optional length scheme of each segment, one item per segment of the column. By default every segment gets an equal Proportional share of the column, as a column placed with the Column tool does, also when favoriteName is given.",
                             "items": {
                                 "$ref": "#/AssemblySegmentScheme"
                             },
