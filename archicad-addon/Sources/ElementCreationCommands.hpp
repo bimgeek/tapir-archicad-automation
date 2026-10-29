@@ -36,8 +36,6 @@ public:
     virtual GS::ObjectState Execute (const GS::ObjectState& parameters, GS::ProcessControl& processControl) const override;
 protected:
     virtual GS::Optional<GS::ObjectState> SetTypeSpecificParameters (API_Element& element, API_ElementMemo& memo, const Stories& stories, const GS::ObjectState& parameters) const = 0;
-    // Runs on the new element for data ACAPI_Element_Create does not take; an error deletes the element again.
-    virtual GS::Optional<GS::UniString> SetParametersAfterCreation (const API_Guid& /*elemGuid*/, const GS::ObjectState& /*parameters*/) const { return {}; }
 protected:
     GS::String     commandName;
     API_ElemTypeID elemTypeID;
@@ -50,7 +48,6 @@ public:
     CreateColumnsCommand ();
     virtual GS::Optional<GS::UniString> GetInputParametersSchema () const override;
     virtual GS::Optional<GS::ObjectState> SetTypeSpecificParameters (API_Element& element, API_ElementMemo& memo, const Stories& stories, const GS::ObjectState& parameters) const override;
-    virtual GS::Optional<GS::UniString> SetParametersAfterCreation (const API_Guid& elemGuid, const GS::ObjectState& parameters) const override;
 };
 
 class CreateSlabsCommand : public CreateElementsCommandBase

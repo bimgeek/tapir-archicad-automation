@@ -2994,31 +2994,6 @@
         },
         "additionalProperties": false
     },
-    "AssemblySegmentScheme": {
-        "type": "object",
-        "description": "The length scheme of a column or beam segment.",
-        "properties": {
-            "lengthType": {
-                "type": "string",
-                "enum": ["Proportional", "Fixed"],
-                "description": "Proportional: the segment takes 'lengthProportion' of the element's length. Fixed: the segment is 'fixedLength' long."
-            },
-            "lengthProportion": {
-                "type": "number",
-                "exclusiveMinimum": 0.0,
-                "description": "The share of the element's length, 1 / number of segments by default."
-            },
-            "fixedLength": {
-                "type": "number",
-                "exclusiveMinimum": 0.0,
-                "description": "Fixed only, required: the length of the segment."
-            }
-        },
-        "additionalProperties": false,
-        "required": [
-            "lengthType"
-        ]
-    },
     "ShellEdgeTrim": {
         "type": "object",
         "description": "How a shell edge is cut.",
