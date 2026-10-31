@@ -83,6 +83,8 @@
 #define ACAPI_View_GetZoom(par1, par2) ACAPI_Database (APIDb_GetZoomID, par1, par2)
 #define ACAPI_Element_RefreshElement(par1, par2) ACAPI_Database (APIDb_RefreshElementID, par1, par2)
 #define ACAPI_Element_RoomReductions(par1, par2) ACAPI_Database (APIDb_RoomReductionsID, (void*) par1, (void*) par2)
+// APIDb_DrawStoryControlID: par1 API_DatabaseUnId*, par2 ShapePrimsProc*.
+#define ACAPI_DrawingPrimitive_DrawStoryControl(par1, par2) ACAPI_Database (APIDb_DrawStoryControlID, (void*) par1, (void*) par2)
 
 #define ACAPI_Revision_GetRVMIssues(par1) ACAPI_Database (APIDb_GetRVMIssuesID, par1)
 #define ACAPI_Revision_GetRVMChanges(par1) ACAPI_Database (APIDb_GetRVMChangesID, par1)
@@ -149,6 +151,7 @@ inline GSErrCode ACAPI_HierarchicalEditing_GetHierarchicalElementOwner (const AP
 #define ACAPI_Database_GetDocumentFrom3DDatabases(par1, par2) ACAPI_Database (APIDb_GetDocumentFrom3DDatabasesID, par1, par2)
 #define ACAPI_Navigator_GetLayoutSets(par1, par2) ACAPI_Environment (APIEnv_GetLayoutSetsID, par1, par2)
 #define ACAPI_Navigator_GetCurrLayerComb(par1) ACAPI_Environment (APIEnv_GetCurrLayerCombID, par1)
+#define ACAPI_Drawing_GetNumberingGridLines(par1) ACAPI_Environment (APIEnv_GetNumberingGridLinesID, reinterpret_cast<void*> (par1))
 #define ACAPI_Database_NewDatabase(par1) ACAPI_Database (APIDb_NewDatabaseID, par1)
 #define ACAPI_Database_ModifyDatabase(par1) ACAPI_Database (APIDb_ModifyDatabaseID, par1)
 
@@ -175,6 +178,9 @@ inline GSErrCode ACAPI_Navigator_ChangeLayoutSets (const API_LayoutInfo* layoutI
 #define ACAPI_Grouping_GetGroupedElems      ACAPI_ElementGroup_GetGroupedElems
 #define ACAPI_Grouping_GetAllGroupedElems   ACAPI_ElementGroup_GetAllGroupedElems
 #define ACAPI_Grouping_GetUserData          ACAPI_ElementGroup_GetUserData
+#define ACAPI_Grouping_SetUserData          ACAPI_ElementGroup_SetUserData
+#define ACAPI_UserData_GetUserData          ACAPI_Attribute_GetUserData
+#define ACAPI_UserData_SetUserData          ACAPI_Attribute_SetUserData
 #define ACAPI_Grouping_Tool                 ACAPI_Element_Tool
 
 #define ACAPI_ProjectSetting_GetPreferences(par1, par2) ACAPI_Environment (APIEnv_GetPreferencesID, par1, (void*)par2)
@@ -273,6 +279,16 @@ inline GSErrCode ACAPI_ProjectOperation_GetPrinterPars (API_PrintPars* printPars
 inline GSErrCode ACAPI_ProjectOperation_GetMiscAppInfo (API_MiscAppInfo* miscAppInfo)
 {
     return ACAPI_Environment (APIEnv_GetMiscAppInfoID, miscAppInfo);
+}
+
+inline GSErrCode ACAPI_ProjectOperation_GetMiscPrinterInfo (API_MiscPrinterInfo* miscPrinterInfo)
+{
+    return ACAPI_Environment (APIEnv_GetMiscPrinterInfoID, miscPrinterInfo);
+}
+
+inline GSErrCode ACAPI_ProjectOperation_GetMiscPlotterInfo (API_MiscPlotterInfo* miscPlotterInfo)
+{
+    return ACAPI_Environment (APIEnv_GetMiscPlotterInfoID, miscPlotterInfo);
 }
 
 inline GSErrCode ACAPI_View_Zoom ()
@@ -501,9 +517,29 @@ inline GSErrCode ACAPI_ProjectOperation_SaveAsModuleFile (const IO::Location* lo
     return ACAPI_Automate (APIDo_SaveAsModuleFileID, (void*) location);
 }
 
+// The AC25/26 forms of the AC27 ACAPI_UserInput_* input functions (APIdefs_Interface.h):
+// APIIo_GetPointID       par1: API_GetPointType*   par2: [RubberLineInfoProc*]   par3: [Get3DComponentProc*]
+// APIIo_GetLineID        par1: API_GetLineType*    par2: [RubberLineInfoProc*]
+// APIIo_GetPolyID        par1: API_GetPolyType*    par2: [API_RubberPolyCallbacks*]
+// APIIo_DrawRubberLineID par1: API_RubberLineType*
 inline GSErrCode ACAPI_UserInput_GetPoint (API_GetPointType* pointInfo, RubberLineInfoProc* rubberLineInfoProc = nullptr, Get3DComponentProc* get3DComponentProc = nullptr)
 {
     return ACAPI_Interface (APIIo_GetPointID, pointInfo, (void*) rubberLineInfoProc, (void*) get3DComponentProc);
+}
+
+inline GSErrCode ACAPI_UserInput_GetLine (API_GetLineType* lineInfo, RubberLineInfoProc* rubberLineInfoProc = nullptr)
+{
+    return ACAPI_Interface (APIIo_GetLineID, lineInfo, (void*) rubberLineInfoProc);
+}
+
+inline GSErrCode ACAPI_UserInput_GetPoly (API_GetPolyType* polyInfo, API_RubberPolyCallbacks* rubberPolyCallbacks = nullptr)
+{
+    return ACAPI_Interface (APIIo_GetPolyID, polyInfo, (void*) rubberPolyCallbacks);
+}
+
+inline GSErrCode ACAPI_UserInput_DrawRubberLine (API_RubberLineType* rubberLine)
+{
+    return ACAPI_Interface (APIIo_DrawRubberLineID, rubberLine);
 }
 
 inline GSErrCode ACAPI_Selection_GetSelectedElement (const API_Neig* apiNeig, API_Guid* apiGuid)
@@ -886,6 +922,35 @@ inline GSErrCode TAPIR_Element_RemoveClassificationItemDefault (API_ElemTypeID t
 #endif
 }
 
+// Every classification of the tool defaults of a plain element type, as (system, item) pairs.
+inline GSErrCode TAPIR_Element_GetClassificationItemsDefault (API_ElemTypeID typeID, GS::Array<GS::Pair<API_Guid, API_Guid>>& systemItemPairs)
+{
+#ifdef ServerMainVers_2600
+    return ACAPI_Element_GetClassificationItemsDefault (typeID, systemItemPairs);
+#else
+    return ACAPI_Element_GetClassificationItemsDefault (typeID, APIVarId_Generic, systemItemPairs);
+#endif
+}
+
+// The property definitions and values of the tool defaults of a plain element type.
+inline GSErrCode TAPIR_Element_GetPropertyDefinitionsOfDefaultElem (API_ElemTypeID typeID, API_PropertyDefinitionFilter filter, GS::Array<API_PropertyDefinition>& definitions)
+{
+#ifdef ServerMainVers_2600
+    return ACAPI_Element_GetPropertyDefinitionsOfDefaultElem (typeID, filter, definitions);
+#else
+    return ACAPI_Element_GetPropertyDefinitionsOfDefaultElem (typeID, APIVarId_Generic, filter, definitions);
+#endif
+}
+
+inline GSErrCode TAPIR_Element_GetPropertyValueOfDefaultElem (API_ElemTypeID typeID, const API_Guid& propertyDefinitionGuid, API_Property& property)
+{
+#ifdef ServerMainVers_2600
+    return ACAPI_Element_GetPropertyValueOfDefaultElem (typeID, propertyDefinitionGuid, property);
+#else
+    return ACAPI_Element_GetPropertyValueOfDefaultElem (typeID, APIVarId_Generic, propertyDefinitionGuid, property);
+#endif
+}
+
 inline GSErrCode TAPIR_Element_SetCategoryValueDefault (const API_Elem_Head& elemHead, const API_ElemCategoryValue& categoryValue)
 {
 #ifdef ServerMainVers_2700
@@ -895,6 +960,20 @@ inline GSErrCode TAPIR_Element_SetCategoryValueDefault (const API_Elem_Head& ele
     return ACAPI_Element_SetCategoryValueDefault (elemHead.type, categoryValue.category, categoryValue);
 #else
     return ACAPI_Element_SetCategoryValueDefault (elemHead.typeID, elemHead.variationID, categoryValue.category, categoryValue);
+#endif
+#endif
+}
+
+// The value of one element category in the tool defaults of an element type.
+inline GSErrCode TAPIR_Element_GetCategoryValueDefault (API_ElemTypeID typeID, const API_ElemCategory& category, API_ElemCategoryValue& categoryValue)
+{
+#ifdef ServerMainVers_2700
+    return ACAPI_Category_GetCategoryValueDefault (typeID, category, &categoryValue);
+#else
+#if defined ServerMainVers_2600
+    return ACAPI_Element_GetCategoryValueDefault (typeID, category, &categoryValue);
+#else
+    return ACAPI_Element_GetCategoryValueDefault (typeID, APIVarId_Generic, category, &categoryValue);
 #endif
 #endif
 }

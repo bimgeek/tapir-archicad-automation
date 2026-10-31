@@ -281,6 +281,111 @@ GS::ObjectState GetPrinterInfoCommand::Execute (const GS::ObjectState& /*paramet
     return response;
 }
 
+GetPrinterAndPlotterInfoCommand::GetPrinterAndPlotterInfoCommand () :
+    CommandBase (CommonSchema::Used)
+{
+}
+
+GS::String GetPrinterAndPlotterInfoCommand::GetName () const
+{
+    return "GetPrinterAndPlotterInfo";
+}
+
+GS::Optional<GS::UniString> GetPrinterAndPlotterInfoCommand::GetRawResponseSchema () const
+{
+    return R"({
+        "type": "object",
+        "properties": {
+            "printer": {
+                "type": "object",
+                "description": "The printer selected in Archicad, or an error when it cannot be read.",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "The name of the selected printer."
+                            },
+                            "portrait": {
+                                "type": "boolean",
+                                "description": "The selected orientation: true for portrait, false for landscape."
+                            }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                            "name",
+                            "portrait"
+                        ]
+                    },
+                    {
+                        "$ref": "#/ErrorItem"
+                    }
+                ]
+            },
+            "plotter": {
+                "type": "object",
+                "description": "The plotter selected in Archicad, or an error when it cannot be read.",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "The name of the selected plotter."
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "The model of the selected plotter."
+                            }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                            "name",
+                            "model"
+                        ]
+                    },
+                    {
+                        "$ref": "#/ErrorItem"
+                    }
+                ]
+            }
+        },
+        "additionalProperties": false,
+        "required": [
+            "printer",
+            "plotter"
+        ]
+    })";
+}
+
+GS::ObjectState GetPrinterAndPlotterInfoCommand::Execute (const GS::ObjectState& /*parameters*/, GS::ProcessControl& /*processControl*/) const
+{
+    GS::ObjectState response;
+
+    API_MiscPrinterInfo printerInfo = {};
+    GSErrCode err = ACAPI_ProjectOperation_GetMiscPrinterInfo (&printerInfo);
+    if (err == NoError) {
+        response.Add ("printer", GS::ObjectState (
+            "name", GS::UniString (printerInfo.name),
+            "portrait", printerInfo.orientPortrait));
+    } else {
+        response.Add ("printer", CreateErrorResponse (err, "Failed to get the printer info."));
+    }
+
+    API_MiscPlotterInfo plotterInfo = {};
+    err = ACAPI_ProjectOperation_GetMiscPlotterInfo (&plotterInfo);
+    if (err == NoError) {
+        response.Add ("plotter", GS::ObjectState (
+            "name", GS::UniString (plotterInfo.name),
+            "model", GS::UniString (plotterInfo.model)));
+    } else {
+        response.Add ("plotter", CreateErrorResponse (err, "Failed to get the plotter info."));
+    }
+
+    return response;
+}
+
 QuitArchicadCommand::QuitArchicadCommand () :
     CommandBase (CommonSchema::NotUsed)
 {
@@ -616,6 +721,22 @@ GS::ObjectState ChangeWindowCommand::Execute (const GS::ObjectState& parameters,
         // rather than silently falling back to a plain database/window switch.
         const GS::UniString guidStr = APIGuidToString (navGuid);
         err = ACAPI_View_GoToView (guidStr.ToCStr ().Get ());
+
+        // GoToView rejects master layout items of the Layout Book with APIERR_GENERAL
+        // (#1481), while switching to their database works. Layout Book items carry no
+        // view settings to apply, so for them a plain database/window switch is the same
+        // as opening the item in the Navigator.
+        if (err != NoError && (navigatorItem.itemType == API_LayoutNavItem || navigatorItem.itemType == API_MasterLayoutNavItem)) {
+            API_DatabaseInfo targetDatabase = navigatorItem.db;
+            err = ACAPI_Window_GetDatabaseInfo (&targetDatabase);
+            if (err == NoError) {
+                err = ACAPI_Database_ChangeCurrentDatabase (&targetDatabase);
+            }
+            if (err == NoError) {
+                API_WindowInfo windowInfo = targetDatabase;
+                err = ACAPI_Window_ChangeWindow (&windowInfo);
+            }
+        }
         return err == NoError
             ? CreateSuccessfulExecutionResult ()
             : CreateErrorResponse (err, "Failed to activate the view");
@@ -696,6 +817,20 @@ GS::ObjectState ChangeWindowCommand::Execute (const GS::ObjectState& parameters,
 
         err = ACAPI_Database_ChangeCurrentDatabase (&targetDatabase);
         if (err != NoError) {
+#if defined (ServerMainVers_2700)
+            // A worksheet or detail whose window was never opened, e.g. one just made by
+            // CreateWorksheets or CreateDetails, cannot be made the current database
+            // (APIERR_BADDATABASE), while activating its Project Map item works (#1602). So that
+            // item is opened instead, the same way as with navigatorItemId.
+            const GS::Optional<API_Guid> projectMapItem = FindProjectMapItemOfWorksheetOrDetail (targetDatabase);
+            if (projectMapItem.HasValue ()) {
+                const GS::UniString guidStr = APIGuidToString (projectMapItem.Get ());
+                const GSErrCode goToViewErr = ACAPI_View_GoToView (guidStr.ToCStr ().Get ());
+                return goToViewErr == NoError
+                    ? CreateSuccessfulExecutionResult ()
+                    : CreateErrorResponse (goToViewErr, "Failed to change current database, and failed to open the database's Project Map item.");
+            }
+#endif
             return CreateErrorResponse (err, "Failed to change current database.");
         }
 
@@ -816,6 +951,138 @@ GS::ObjectState GetContainingDatabasesCommand::Execute (const GS::ObjectState& p
     }
 
     return response;
+}
+
+CloseWindowsCommand::CloseWindowsCommand () :
+    CommandBase (CommonSchema::Used)
+{
+}
+
+GS::String CloseWindowsCommand::GetName () const
+{
+    return "CloseWindows";
+}
+
+GS::Optional<GS::UniString> CloseWindowsCommand::GetInputParametersSchema () const
+{
+    return R"({
+        "type": "object",
+        "properties": {
+            "windows": {
+                "type": "array",
+                "description": "The windows to close.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "databaseId": {
+                            "$ref": "#/DatabaseId",
+                            "description": "The database shown in the window, as GetDatabases, GetContainingDatabases or GetDatabaseIdFromNavigatorItemId return it."
+                        },
+                        "windowType": {
+                            "$ref": "#/WindowType",
+                            "description": "Optional. When given, the window is only closed when its database is of this type."
+                        }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                        "databaseId"
+                    ]
+                }
+            }
+        },
+        "additionalProperties": false,
+        "required": [
+            "windows"
+        ]
+    })";
+}
+
+GS::Optional<GS::UniString> CloseWindowsCommand::GetRawResponseSchema () const
+{
+    return R"({
+        "type": "object",
+        "properties": {
+            "executionResults": {
+                "$ref": "#/ExecutionResults"
+            }
+        },
+        "additionalProperties": false,
+        "required": [
+            "executionResults"
+        ]
+    })";
+}
+
+GS::ObjectState CloseWindowsCommand::Execute (const GS::ObjectState& parameters, GS::ProcessControl& /*processControl*/) const
+{
+#ifdef ServerMainVers_2700
+    GS::Array<GS::ObjectState> windows;
+    parameters.Get ("windows", windows);
+
+    GS::ObjectState response;
+    const auto& executionResults = response.AddList<GS::ObjectState> ("executionResults");
+
+    for (const GS::ObjectState& window : windows) {
+        const GS::ObjectState* databaseId = window.Get ("databaseId");
+        if (databaseId == nullptr) {
+            executionResults (CreateFailedExecutionResult (APIERR_BADPARS, "databaseId is missing."));
+            continue;
+        }
+
+        // Resolves the database the same way ChangeWindow does.
+        API_WindowInfo windowInfo = DatabaseIdResolver::Instance ().GetDatabaseWithId (GetGuidFromObjectState (*databaseId));
+        GSErrCode err = ACAPI_Window_GetDatabaseInfo (&windowInfo);
+        if (err != NoError) {
+            executionResults (CreateFailedExecutionResult (err, "Failed to resolve the database."));
+            continue;
+        }
+
+        GS::UniString windowTypeStr;
+        if (window.Get ("windowType", windowTypeStr) && ConvertStringToWindowType (windowTypeStr) != windowInfo.typeID) {
+            executionResults (CreateFailedExecutionResult (APIERR_BADPARS, "databaseId does not belong to the requested windowType."));
+            continue;
+        }
+
+        err = ACAPI_Window_CloseWindow (&windowInfo);
+        executionResults (err == NoError
+            ? CreateSuccessfulExecutionResult ()
+            : CreateFailedExecutionResult (err, "Failed to close the window."));
+    }
+
+    return response;
+#else
+    (void) parameters;
+    return CreateErrorResponse (APIERR_NOTSUPPORTED, "CloseWindows requires Archicad 27 or later.");
+#endif
+}
+
+RebuildCurrentDatabaseCommand::RebuildCurrentDatabaseCommand () :
+    CommandBase (CommonSchema::Used)
+{
+}
+
+GS::String RebuildCurrentDatabaseCommand::GetName () const
+{
+    return "RebuildCurrentDatabase";
+}
+
+GS::Optional<GS::UniString> RebuildCurrentDatabaseCommand::GetRawResponseSchema () const
+{
+    return R"({
+        "$ref": "#/ExecutionResult"
+    })";
+}
+
+GS::ObjectState RebuildCurrentDatabaseCommand::Execute (const GS::ObjectState& /*parameters*/, GS::ProcessControl& /*processControl*/) const
+{
+#ifdef ServerMainVers_2700
+    const GSErrCode err = ACAPI_Database_RebuildCurrentDatabase ();
+    return err == NoError
+        ? CreateSuccessfulExecutionResult ()
+        : CreateFailedExecutionResult (err, "Failed to rebuild the current database.");
+#else
+    return CreateFailedExecutionResult (APIERR_NOTSUPPORTED, "RebuildCurrentDatabase requires Archicad 27 or later.");
+#endif
 }
 
 
@@ -1601,6 +1868,326 @@ GS::ObjectState GetPointFromUserCommand::Execute (const GS::ObjectState& paramet
     response.Add ("position", Create3DCoordinateObjectState (pointInfo.pos));
     return response;
 }
+
+// ---------------------------------------------------------------------------
+// GetLineFromUser
+// ---------------------------------------------------------------------------
+
+static void RubberLineCallBack (const API_RubberLineInfo* info)
+{
+    API_RubberLineType rubberLine = {};
+    rubberLine.lineThick = APIRubberLine_Simple;
+
+    // Draw a unit square around the current cursor position.
+    rubberLine.c2.x = info->actCoord.x - 0.5;
+    rubberLine.c2.y = info->actCoord.y - 0.5;
+    rubberLine.c2.z = info->actCoord.z;
+
+    rubberLine.c1 = rubberLine.c2;
+    rubberLine.c2.y += 1.0;
+    ACAPI_UserInput_DrawRubberLine (&rubberLine);
+
+    rubberLine.c1 = rubberLine.c2;
+    rubberLine.c2.x += 1.0;
+    ACAPI_UserInput_DrawRubberLine (&rubberLine);
+
+    rubberLine.c1 = rubberLine.c2;
+    rubberLine.c2.y -= 1.0;
+    ACAPI_UserInput_DrawRubberLine (&rubberLine);
+
+    rubberLine.c1 = rubberLine.c2;
+    rubberLine.c2.x -= 1.0;
+    ACAPI_UserInput_DrawRubberLine (&rubberLine);
+}
+
+GetLineFromUserCommand::GetLineFromUserCommand () :
+    CommandBase (CommonSchema::Used)
+{}
+
+GS::String GetLineFromUserCommand::GetName () const
+{
+    return "GetLineFromUser";
+}
+
+GS::Optional<GS::UniString> GetLineFromUserCommand::GetInputParametersSchema () const
+{
+    return R"({
+        "type": "object",
+        "properties": {
+            "startPrompt": {
+                "type": "string",
+                "description": "Prompt for selecting the line start point.",
+                "default": "Click the start point of the line"
+            },
+            "endPrompt": {
+                "type": "string",
+                "description": "Prompt for selecting the line end point.",
+                "default": "Click the end point of the line"
+            },
+            "showRubberLineFeedback": {
+                "type": "boolean",
+                "description": "If true, draws a unit-square rubber feedback around the cursor while input is active.",
+                "default": true
+            }
+        },
+        "additionalProperties": false
+    })";
+}
+
+GS::Optional<GS::UniString> GetLineFromUserCommand::GetRawResponseSchema () const
+{
+    return R"({
+        "type": "object",
+        "properties": {
+            "cancelled": {
+                "type": "boolean",
+                "description": "True if the user cancelled the input (ESC)."
+            },
+            "startPoint": {
+                "$ref": "#/Coordinate3D",
+                "description": "The start point of the line."
+            },
+            "endPoint": {
+                "$ref": "#/Coordinate3D",
+                "description": "The end point of the line. It is only valid if cancelled is false."
+            }
+        }
+    })";
+}
+
+GS::ObjectState GetLineFromUserCommand::Execute (const GS::ObjectState& parameters, GS::ProcessControl& /*processControl*/) const
+{
+    GS::UniString startPromptStr = "Click the start point of the line";
+    parameters.Get ("startPrompt", startPromptStr);
+
+    GS::UniString endPromptStr = "Click the end point of the line";
+    parameters.Get ("endPrompt", endPromptStr);
+
+    bool showRubberLineFeedback = true;
+    parameters.Get ("showRubberLineFeedback", showRubberLineFeedback);
+
+    API_GetPointType pointInfo = {};
+    CHTruncate (startPromptStr.ToCStr ().Get (), pointInfo.prompt, sizeof (pointInfo.prompt));
+
+    GSErrCode err = ACAPI_UserInput_GetPoint (&pointInfo);
+
+    if (err == APIERR_CANCEL) {
+        return GS::ObjectState ("cancelled", true);
+    }
+
+    if (err != NoError) {
+        return CreateErrorResponse (err, "Failed to retrieve start point");
+    }
+
+    API_GetLineType lineInfo = {};
+    lineInfo.startCoord = pointInfo.pos;
+    CHTruncate (endPromptStr.ToCStr ().Get (), lineInfo.prompt, sizeof (lineInfo.prompt));
+
+    err = showRubberLineFeedback
+        ? ACAPI_UserInput_GetLine (&lineInfo, RubberLineCallBack)
+        : ACAPI_UserInput_GetLine (&lineInfo);
+
+    if (err == APIERR_CANCEL) {
+        return GS::ObjectState ("cancelled", true);
+    }
+
+    if (err != NoError) {
+        return CreateErrorResponse (err, "Failed to retrieve end point");
+    }
+
+    return GS::ObjectState (
+        "cancelled", false,
+        "startPoint", Create3DCoordinateObjectState (lineInfo.startCoord),
+        "endPoint", Create3DCoordinateObjectState (lineInfo.pos)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GetPolygonFromUser
+// ---------------------------------------------------------------------------
+
+template <class ItemType>
+static bool TryGetHandleItemCount (GSHandle handle, Int32& itemCount)
+{
+    if (handle == nullptr) {
+        return false;
+    }
+
+    const GSSize handleSize = BMhGetSize (handle);
+    if (handleSize <= 0 || handleSize % sizeof (ItemType) != 0) {
+        return false;
+    }
+
+    itemCount = static_cast<Int32> (handleSize / sizeof (ItemType));
+    return true;
+}
+
+GetPolygonFromUserCommand::GetPolygonFromUserCommand () :
+    CommandBase (CommonSchema::Used)
+{}
+
+GS::String GetPolygonFromUserCommand::GetName () const
+{
+    return "GetPolygonFromUser";
+}
+
+GS::Optional<GS::UniString> GetPolygonFromUserCommand::GetInputParametersSchema () const
+{
+    return R"({
+        "type": "object",
+        "properties": {
+            "startPrompt": {
+                "type": "string",
+                "description": "Prompt for selecting the polygon start point.",
+                "default": "Click the start point of the polygon"
+            },
+            "prompt": {
+                "type": "string",
+                "description": "Prompt shown while placing the remaining polygon nodes.",
+                "default": "Click polygon nodes and finish the input"
+            },
+            "method": {
+                "type": "string",
+                "description": "Polygon input method. 'General' = free polygon, 'Rect' = axis-aligned rectangle, 'RotRect' = rotated rectangle, 'Polyline' = open polyline.",
+                "enum": ["General", "Rect", "RotRect", "Polyline"],
+                "default": "General"
+            }
+        },
+        "additionalProperties": false
+    })";
+}
+
+GS::Optional<GS::UniString> GetPolygonFromUserCommand::GetRawResponseSchema () const
+{
+    return R"({
+    "type": "object",
+    "properties": {
+        "cancelled": {
+            "type": "boolean",
+            "description": "True if the user cancelled the input (ESC)."
+        },
+        "points": {
+            "type": "array",
+            "items": {
+                "$ref": "#/Coordinate2D"
+            }
+        },
+        "arcs": {
+            "type": "array",
+            "items": {
+                "$ref": "#/PolyArc"
+            }
+        }
+    },
+    "required": ["cancelled"]
+})";
+}
+
+GS::ObjectState GetPolygonFromUserCommand::Execute (const GS::ObjectState& parameters, GS::ProcessControl& /*processControl*/) const
+{
+    try {
+        GS::UniString startPromptStr = "Click the start point of the polygon";
+        parameters.Get ("startPrompt", startPromptStr);
+
+        GS::UniString promptStr = "Click polygon nodes and finish the input";
+        parameters.Get ("prompt", promptStr);
+
+        GS::UniString methodStr = "General";
+        parameters.Get ("method", methodStr);
+        API_PolyGetMethod polyMethod = APIPolyGetMethod_General;
+        if (methodStr == "Rect") {
+            polyMethod = APIPolyGetMethod_Rect;
+        } else if (methodStr == "RotRect") {
+            polyMethod = APIPolyGetMethod_RotRect;
+        } else if (methodStr == "Polyline") {
+            polyMethod = APIPolyGetMethod_Polyline;
+        }
+
+        API_GetPointType startPointInfo = {};
+        CHTruncate (startPromptStr.ToCStr ().Get (), startPointInfo.prompt, sizeof (startPointInfo.prompt));
+
+        GSErrCode err = ACAPI_UserInput_GetPoint (&startPointInfo);
+        if (err == APIERR_CANCEL) {
+            return GS::ObjectState ("cancelled", true);
+        }
+        if (err != NoError) {
+            return CreateErrorResponse (err,"Failed to retrieve start point");
+        }
+
+        API_GetPolyType polyInfo = {};
+        polyInfo.startCoord = startPointInfo.pos;
+        polyInfo.method = polyMethod;
+        CHTruncate (promptStr.ToCStr ().Get (), polyInfo.prompt, sizeof (polyInfo.prompt));
+
+        err = ACAPI_UserInput_GetPoly (&polyInfo);
+
+        const GS::OnExit disposePolyHandles ([&polyInfo]() {
+            if (polyInfo.coords != nullptr) {
+                BMKillHandle (reinterpret_cast<GSHandle*> (&polyInfo.coords));
+            }
+            if (polyInfo.parcs != nullptr) {
+                BMKillHandle (reinterpret_cast<GSHandle*> (&polyInfo.parcs));
+            }
+        });
+
+        if (err == APIERR_CANCEL) {
+            return GS::ObjectState ("cancelled", true);
+        }
+        if (err != NoError) {
+            return CreateErrorResponse (err,"Failed to retrieve polygon points");
+        }
+        if (polyInfo.coords == nullptr) {
+            return CreateErrorResponse (APIERR_GENERAL, "Failed: Polygon input did not return coordinate handle.");
+        }
+
+        Int32 coordCountInHandle = 0;
+        if (!TryGetHandleItemCount<API_Coord> (reinterpret_cast<GSHandle> (polyInfo.coords), coordCountInHandle)) {
+            return CreateErrorResponse (APIERR_GENERAL, "Polygon input returned an invalid coordinate handle.");
+        }
+
+        if (coordCountInHandle <= 1) {
+            return CreateErrorResponse (APIERR_GENERAL, "Polygon input returned an empty coordinate handle.");
+        }
+
+        Int32 coordCountToSerialize = polyInfo.nCoords;
+        if (coordCountToSerialize <= 0 || coordCountToSerialize >= coordCountInHandle) {
+            coordCountToSerialize = coordCountInHandle - 1;
+        }
+
+        Int32 arcCountToSerialize = 0;
+        if (polyInfo.parcs != nullptr && polyInfo.nArcs > 0) {
+            Int32 arcCountInHandle = 0;
+            if (!TryGetHandleItemCount<API_PolyArc> (reinterpret_cast<GSHandle> (polyInfo.parcs), arcCountInHandle)) {
+                return CreateErrorResponse (APIERR_GENERAL, "Polygon input returned an invalid arc handle.");
+            }
+
+            arcCountToSerialize = std::min (polyInfo.nArcs, arcCountInHandle);
+        }
+
+        GS::ObjectState response (
+            "cancelled", false
+        );
+
+        const auto& points = response.AddList<GS::ObjectState> ("points");
+        for (Int32 i = 1; i <= coordCountToSerialize; ++i) {
+            const API_Coord& c = (*polyInfo.coords)[i];
+            points (Create2DCoordinateObjectState (c));
+        }
+
+        if (polyInfo.parcs != nullptr && arcCountToSerialize > 0) {
+            const auto& arcs = response.AddList<GS::ObjectState> ("arcs");
+            for (Int32 i = 0; i < arcCountToSerialize; ++i) {
+                arcs (CreatePolyArcObjectState ((*polyInfo.parcs)[i]));
+            }
+        }
+
+        return response;
+
+    } catch (...) {
+        return CreateErrorResponse (APIERR_GENERAL, "Unexpected exception while processing polygon input.");
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // GetElementFromUser
